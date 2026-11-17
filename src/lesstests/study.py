@@ -271,8 +271,8 @@ class StudyReport:
             lines += [
                 f"## {Budget(budget).label}, {selected['kept']} tests",
                 "",
-                f"{len(code.lost_classes)} classes lost every method the full suite reached, and "
-                f"{len(code.lost_methods)} methods are no longer reached.",
+                f"Classes that lost every method the full suite reached: {len(code.lost_classes)}. "
+                f"Methods no longer reached: {len(code.lost_methods)}.",
                 "",
                 "### Classes",
                 "",

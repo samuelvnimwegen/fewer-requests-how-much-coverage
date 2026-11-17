@@ -100,7 +100,7 @@ def test_report_adds_the_server_code_each_version_keeps_and_lists_what_selected_
     assert "| 50% | 2 | Selected | 90.0% | 50.0% | 50.0% | 1 | 1 |" in lines
     assert "| 50% | 2 | Random | 74.0% (60.0%, 100.0%) | 50.0% (50.0%, 50.0%) | 50.0% (50.0%, 50.0%) |  |  |" in lines
     lost = report.code_lost()
-    assert "1 classes lost every method the full suite reached, and 1 methods are no longer reached." in lost
+    assert "Classes that lost every method the full suite reached: 1. Methods no longer reached: 1." in lost
     assert "### Classes\n\n* `a.B`\n\n### Methods\n\n* `a.B.x()V`\n" in lost
 
 

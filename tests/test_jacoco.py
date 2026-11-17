@@ -439,3 +439,8 @@ def test_an_idle_dump_of_another_build_stops_the_count(tmp_path: Path) -> None:
     counter = CodeCounter(jacoco, [classes], "demo/", idle)
     with pytest.raises(RuntimeError, match="The idle dump ran another build for 1 of its classes, such as demo/App"):
         counter.kept([KeptPair("pos", (dump,), (dump,))])
+
+
+def test_the_helper_declares_no_package() -> None:
+    # Java 22's single file launch refuses a package that doesn't match the folder, and Java 21 never notices.
+    assert not any(line.startswith("package ") for line in JaCoCo.HELPER.read_text(encoding="utf-8").splitlines())
