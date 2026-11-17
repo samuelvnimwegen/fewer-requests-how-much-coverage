@@ -437,5 +437,5 @@ def test_an_idle_dump_of_another_build_stops_the_count(tmp_path: Path) -> None:
     rebuilt = APP.replace("return 2;", "return 3;")
     classes, dump = _compile_and_run(tmp_path, jacoco, rebuilt, "new", "pos")
     counter = CodeCounter(jacoco, [classes], "demo/", idle)
-    with pytest.raises(RuntimeError, match="The idle dump ran another build: nomatch\tdemo/App"):
+    with pytest.raises(RuntimeError, match="The idle dump ran another build for 1 classes, such as demo/App"):
         counter.kept([KeptPair("pos", (dump,), (dump,))])

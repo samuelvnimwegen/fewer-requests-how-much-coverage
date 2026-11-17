@@ -19,28 +19,22 @@ class RecordingCode:
     """
 
     def __init__(self, recordings: list[Recording], jacoco: JaCoCo, code: ServerCode) -> None:
-        """Keep the recordings, the first one being the original suite, which must have its class files."""
+        """Keep the recordings, the first one being the original suite.
+
+        Raises:
+            ValueError: If the original recording has no class files yet.
+        """
         self._recordings = recordings
         self._jacoco = jacoco
         self._code = code
         original = recordings[0]
-        idle = original.idle_file if original.idle_file.exists() else None
-        self._counter = CodeCounter(jacoco, self._locations(original, code), code.prefix, idle)
 
-    @staticmethod
-    def _locations(recording: Recording, code: ServerCode) -> list[Path]:
-        """Find the class files a finished recording copied out of the image.
-
-        Returns:
-            The class folders and jars.
-
-        Raises:
-            ValueError: If there are none, since the copy only happens once the record run finished.
-        """
-        locations = code.locations(recording.classes_folder)
+        # Record copies the class files only once its run finished.
+        locations = code.locations(original.classes_folder)
         if not locations:
-            raise ValueError(f"{recording.folder} has no class files yet. Run record again so it finishes")
-        return locations
+            raise ValueError(f"{original.folder} has no class files yet. Run record again so it finishes")
+        idle = original.idle_file if original.idle_file.exists() else None
+        self._counter = CodeCounter(jacoco, locations, code.prefix, idle)
 
     @classmethod
     def of(cls, recording: Recording, jacoco: JaCoCo | None, code: ServerCode | None) -> Self | None:

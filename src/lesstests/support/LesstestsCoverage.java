@@ -39,7 +39,8 @@ import org.jacoco.cli.internal.core.tools.ExecFileLoader;
  * for its methods gets one "method" line per covered method. A class whose file differs from one the server ran
  * gets a "nomatch" line, even when another dump of the group ran the same file, and a class that ran without any
  * file gets a "missing" line, leaving out the classes Spring and Hibernate make at runtime. An empty exec file
- * stops the count, since a dump always holds a header.
+ * stops the count, since a dump always holds a header. An idle file of another build stops it too, since the mask
+ * matches classes by id.
  */
 public final class LesstestsCoverage {
 
@@ -62,10 +63,14 @@ public final class LesstestsCoverage {
         Map<Long, Probes> idle = job.idle == null ? Map.of() : coverage.load(job.idle);
 
         // The mask matches classes by id, so an idle dump of another build would mask only the classes that stayed.
-        for (String problem : coverage.problems(idle)) {
-            if (problem.startsWith("nomatch")) {
-                throw new IllegalStateException("The idle dump ran another build: " + problem);
-            }
+        List<String> rebuilt = coverage.problems(idle).stream()
+            .filter(problem -> problem.startsWith("nomatch\t"))
+            .map(problem -> problem.substring("nomatch\t".length()))
+            .toList();
+        if (!rebuilt.isEmpty()) {
+            throw new IllegalStateException("The idle dump ran another build for " + rebuilt.size()
+                + " classes, such as " + rebuilt.get(0) + ". Record again so the idle dump and the class files"
+                + " come from one image");
         }
         Counts totals = coverage.totals();
         try (PrintWriter out = new PrintWriter(Files.newBufferedWriter(Path.of(args[2]), StandardCharsets.UTF_8))) {
