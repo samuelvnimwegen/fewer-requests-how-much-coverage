@@ -1,7 +1,7 @@
 """Code coverage of recordings, plans and benchmark runs, counted from the JaCoCo dumps next to them."""
 
 import json
-from collections.abc import Iterable
+from collections.abc import Hashable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Self
@@ -25,7 +25,22 @@ class RecordingCode:
         self._code = code
         original = recordings[0]
         idle = original.idle_file if original.idle_file.exists() else None
-        self._counter = CodeCounter(jacoco, code.locations(original.classes_folder), code.prefix, idle)
+        self._counter = CodeCounter(jacoco, self._locations(original, code), code.prefix, idle)
+
+    @staticmethod
+    def _locations(recording: Recording, code: ServerCode) -> list[Path]:
+        """Find the class files a finished recording copied out of the image.
+
+        Returns:
+            The class folders and jars.
+
+        Raises:
+            ValueError: If there are none, since the copy only happens once the record run finished.
+        """
+        locations = code.locations(recording.classes_folder)
+        if not locations:
+            raise ValueError(f"{recording.folder} has no class files yet. Run record again so it finishes")
+        return locations
 
     @classmethod
     def of(cls, recording: Recording, jacoco: JaCoCo | None, code: ServerCode | None) -> Self | None:
@@ -89,7 +104,7 @@ class RecordingCode:
         """
         base = self.files(reference)
         pairs = [KeptPair(name, self.files(tests), base, name in listed) for name, tests in versions.items()]
-        return self._counter.kept(pairs)
+        return {str(name): kept for name, kept in self._counter.kept(pairs).items()}
 
     def check(self) -> CodeCheck:
         """Check the helper against JaCoCo's own report on all dumps of the first recording.
@@ -116,19 +131,13 @@ class RecordingCode:
         for version in plan.versions:
             version.code = kept[version.name]
 
-    def against_runs(self, runs: dict[int, Path]) -> dict[int, CodeKept]:
-        """Count what each Original benchmark run reached of what the recording reached.
+    @property
+    def recorded(self) -> tuple[Path, ...]:
+        """The dumps of every test of the original recording."""
+        return self.files(record.test for record in self._recordings[0].records())
 
-        Returns:
-            The kept coverage by round.
-        """
-        recorded = self.files(record.test for record in self._recordings[0].records())
-        pairs = [KeptPair(str(number), (path,), recorded) for number, path in runs.items()]
-        kept = self._counter.kept(pairs)
-        return {number: kept[str(number)] for number in runs}
-
-    def runs(self, pairs: list[KeptPair]) -> dict[str, CodeKept]:
-        """Count what benchmark runs kept of other runs, with this recording's classes and idle dump.
+    def pairs(self, pairs: list[KeptPair]) -> dict[Hashable, CodeKept]:
+        """Count any pairs of dumps with this recording's classes and idle dump, such as benchmark runs.
 
         Returns:
             The kept coverage by pair name.
@@ -154,15 +163,17 @@ class BenchCode:
         Returns:
             The kept coverage of every run.
         """
+        recorded = code.recorded
         pairs = [
-            KeptPair(f"{version}\t{number}", (path,), (dumps[original, number],))
+            KeptPair((version, number), (path,), (dumps[original, number],))
             for (version, number), path in dumps.items()
-            if (original, number) in dumps
         ]
-        kept = code.runs(pairs)
-        runs = {(name.split("\t")[0], int(name.split("\t")[1])): value for name, value in kept.items()}
-        originals = {number: path for (version, number), path in dumps.items() if version == original}
-        return cls(runs, code.against_runs(originals))
+        pairs += [
+            KeptPair(number, (path,), recorded) for (version, number), path in dumps.items() if version == original
+        ]
+        kept = code.pairs(pairs)
+        runs = {key: value for key, value in kept.items() if isinstance(key, tuple)}
+        return cls(runs, {key: value for key, value in kept.items() if isinstance(key, int)})
 
     def to_dict(self) -> dict[str, Any]:
         """Turn it into JSON friendly data.

@@ -156,7 +156,7 @@ class Benchmark:
                     self._once(self._plan.original, -number, 0, out)
                 for number in range(1, rounds + 1):
                     for position, version in enumerate(self._order(number), start=1):
-                        saved = out / "runs" / f"{self._name(version, number)}.json"
+                        saved = out / "runs" / f"{self.run_name(version.name, number)}.json"
                         run = (
                             BenchRun.from_dict(json.loads(saved.read_text(encoding="utf-8")))
                             if saved.exists()
@@ -216,7 +216,7 @@ class Benchmark:
         for attempt in range(1, self.ATTEMPTS):
             if run.started:
                 break
-            name = self._name(version, number)
+            name = self.run_name(version.name, number)
             failed = out / "runs" / "failed" / f"{name}-attempt-{attempt}.json"
             failed.parent.mkdir(parents=True, exist_ok=True)
             failed.write_text(json.dumps(run.to_dict(), indent=1), encoding="utf-8")
@@ -237,7 +237,7 @@ class Benchmark:
 
         # A late answer from the previous run must not end up in this one.
         self._log.take()
-        name = self._name(version, number)
+        name = self.run_name(version.name, number)
         result = self._runner.run_suite(version.tests, f"testng/{name}")
         exchanges, errors = self._log.take()
         self._code.dump(self.dump_path(out, name))
@@ -294,15 +294,6 @@ class Benchmark:
             return f"warmup-{-number}"
         return f"round-{number}-{version.lower().replace(' + ', '-').replace(' ', '-')}"
 
-    @classmethod
-    def _name(cls, version: SuiteVersion, number: int) -> str:
-        """Name a run of a version.
-
-        Returns:
-            The name `run_name` gives.
-        """
-        return cls.run_name(version.name, number)
-
 
 class BenchReport:
     """Turns the runs into the result table: tests, requests, runtime and the coverage each version kept.
@@ -347,8 +338,8 @@ class BenchReport:
         columns += ["RESTCov items kept", "Value items kept"]
         if self._code is not None:
             lines[-2] += (
-                " Lines, branches and methods kept count the server code the JaCoCo agent saw, without the code the "
-                "server runs on its own, in the same way."
+                " Lines, branches and methods kept compare the server code the JaCoCo agent saw with the Original run "
+                "of the same round too, leaving out the code the server runs on its own."
             )
             columns += [f"{kind.capitalize()} kept" for kind in CodeKept.KINDS]
         lines += ["| " + " | ".join(columns) + " |", "|---|" + "---:|" * (len(columns) - 1)]
@@ -369,20 +360,20 @@ class BenchReport:
         if not kept:
             return ["" for _ in CodeKept.KINDS]
         return [
-            f"{statistics.median(run.share(kind) for run in kept):.1%} of {getattr(kept[0].reference, kind)}"
+            f"{statistics.median(run.share(kind) for run in kept):.1%} of {kept[0].reference.of(kind)}"
             for kind in CodeKept.KINDS
         ]
 
     @staticmethod
     def _against_recording(code: BenchCode) -> str:
-        """Say how much of the code the recording reached the Original runs reached, as a whole suite.
+        """Say what share of the recording's code the Original runs reached as one whole suite.
 
         Returns:
             One line.
         """
         kept = list(code.recording.values())
         shares = ", ".join(
-            f"{statistics.median(run.share(kind) for run in kept):.1%} of the {getattr(kept[0].reference, kind)} {kind}"
+            f"{statistics.median(run.share(kind) for run in kept):.1%} of the {kept[0].reference.of(kind)} {kind}"
             for kind in CodeKept.KINDS
         )
         return f"Against the recording, where every test ran alone, the Original runs reached a median of {shares}."

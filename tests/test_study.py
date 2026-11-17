@@ -90,17 +90,18 @@ def test_report_adds_the_server_code_each_version_keeps_and_lists_what_selected_
                 "code": _code(90, ("a.B.x()V",), ("a.B",)),
             },
             {"version": "random", "budget": 0.5, "kept": 2, "requests": 4, "lost": _counts(), "code": _code(60)},
-            {"version": "random", "budget": 0.5, "kept": 2, "requests": 6, "lost": _counts(), "code": _code(80)},
+            {"version": "random", "budget": 0.5, "kept": 2, "requests": 6, "lost": _counts(), "code": _code(62)},
+            {"version": "random", "budget": 0.5, "kept": 2, "requests": 5, "lost": _counts(), "code": _code(100)},
         ],
     }
     report = StudyReport(result)
     lines = report.markdown().splitlines()
     assert "| 100% | 4 | Full suite | 100 | 4 | 2 |  |  |" in lines
     assert "| 50% | 2 | Selected | 90.0% | 50.0% | 50.0% | 1 | 1 |" in lines
-    assert "| 50% | 2 | Random | 70.0% (60.0%, 80.0%) | 50.0% (50.0%, 50.0%) | 50.0% (50.0%, 50.0%) |  |  |" in lines
+    assert "| 50% | 2 | Random | 74.0% (60.0%, 100.0%) | 50.0% (50.0%, 50.0%) | 50.0% (50.0%, 50.0%) |  |  |" in lines
     lost = report.code_lost()
     assert "1 classes lost every method the full suite reached, and 1 methods are no longer reached." in lost
-    assert "* `a.B.x()V`" in lost
+    assert "### Classes\n\n* `a.B`\n\n### Methods\n\n* `a.B.x()V`\n" in lost
 
 
 def test_a_report_without_code_coverage_has_no_code_table() -> None:
@@ -150,3 +151,7 @@ def test_the_study_counts_every_smaller_suite_in_one_go_and_lists_only_selected(
     assert listed == frozenset({"selected-50-0"})
     assert [suite.code.share("lines") for suite in suites if suite.code] == [0.5, 0.5, 0.5]
     assert (tmp_path / "selection" / "code-lost.md").exists()
+
+    # A later run without code coverage must not leave the old list behind.
+    SelectionStudy(recording, coverage, restcov, [Budget(0.5)], draws=2, seed=1).run(tmp_path / "selection")
+    assert not (tmp_path / "selection" / "code-lost.md").exists()

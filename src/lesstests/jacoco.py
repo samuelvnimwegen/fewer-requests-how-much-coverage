@@ -6,7 +6,7 @@ import tarfile
 import tempfile
 import time
 import xml.etree.ElementTree as ElementTree
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Hashable, Iterable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, ClassVar, Protocol, Self
@@ -49,8 +49,12 @@ class JaCoCo:
         return self.folder / "jacococli.jar"
 
     def dump(self, port: int, path: Path) -> None:
-        """Save the agent's counters on this machine's `port` to `path`, and set them back to zero."""
+        """Save the agent's counters on this machine's `port` to `path`, and set them back to zero.
+
+        `jacococli` adds a session to a file that already exists, so an older dump of the same test goes first.
+        """
         path.parent.mkdir(parents=True, exist_ok=True)
+        path.unlink(missing_ok=True)
         address = ["--address", "127.0.0.1", "--port", str(port)]
         self._cli("dump", *address, "--destfile", str(path), "--reset", "--retry", "5", "--quiet")
 
@@ -61,6 +65,7 @@ class JaCoCo:
             The root of the XML report.
         """
         merged = xml.with_suffix(".exec")
+        merged.unlink(missing_ok=True)
         self._cli("merge", *map(str, files), "--destfile", str(merged), "--quiet")
         locations = [arg for location in classes for arg in ("--classfiles", str(location))]
         self._cli("report", str(merged), *locations, "--xml", str(xml), "--quiet")
@@ -150,8 +155,7 @@ class ServerCode:
     """What JaCoCo measures of a subject's server: its package, where its classes are, and how to reach the agent.
 
     `classes` are paths inside the image, folders or jars, and may hold a `*`. `idle_seconds` is how long a server
-    runs alone so the code its scheduled jobs run can be left out. Fineract's most frequent jobs run every minute,
-    10 minutes and 15 minutes, so 16 minutes sees each of them.
+    runs alone so the code its scheduled jobs run can be left out.
     """
 
     package: str
@@ -269,7 +273,9 @@ class ServerClasses:
         Raises:
             RuntimeError: If docker fails, or the image holds none of the locations.
         """
-        created = subprocess.run(["docker", "create", self.image], capture_output=True, text=True, check=True)
+        created = subprocess.run(["docker", "create", self.image], capture_output=True, text=True)
+        if created.returncode != 0:
+            raise RuntimeError(f"docker create {self.image} failed:\n{created.stderr[-2000:]}")
         container = created.stdout.strip()
         partial = target.with_name(target.name + ".partial")
         try:
@@ -308,6 +314,14 @@ class CodeCounts:
             The counts.
         """
         return {"lines": self.lines, "branches": self.branches, "methods": self.methods}
+
+    def of(self, kind: str) -> int:
+        """Read one kind, `lines`, `branches` or `methods`.
+
+        Returns:
+            The count.
+        """
+        return self.to_dict()[kind]
 
     @classmethod
     def from_dict(cls, raw: dict[str, int]) -> Self:
@@ -356,8 +370,8 @@ class CodeKept:
         Returns:
             A number from 0 to 1, or 1 when the reference covered none.
         """
-        total = getattr(self.reference, kind)
-        return getattr(self.kept, kind) / total if total else 1.0
+        total = self.reference.of(kind)
+        return self.kept.of(kind) / total if total else 1.0
 
     def to_dict(self) -> dict[str, Any]:
         """Turn it into JSON friendly data.
@@ -402,9 +416,9 @@ class MethodName:
 
 @dataclass(frozen=True, slots=True)
 class KeptPair:
-    """A version's dump files and those of the reference it gets compared with."""
+    """A version's dump files and those of the reference it gets compared with. `name` is the key of the result."""
 
-    name: str
+    name: Hashable
     files: tuple[Path, ...]
     reference: tuple[Path, ...]
     methods: bool = False
@@ -463,7 +477,7 @@ class CodeCounter:
         self._prefix = prefix
         self._idle = idle
 
-    def kept(self, pairs: Iterable[KeptPair]) -> dict[str, CodeKept]:
+    def kept(self, pairs: Iterable[KeptPair]) -> dict[Hashable, CodeKept]:
         """Count what every version kept of its reference, in one helper run.
 
         Returns:
@@ -482,9 +496,14 @@ class CodeCounter:
             files, reference = frozenset(pair.files), frozenset(pair.reference)
             version, base = counted[files], counted[reference]
             both = version.covered + base.covered - counted[files | reference].covered
-            lost = tuple(sorted(base.methods - version.methods))
-            classes = {MethodName.owner(method) for method in base.methods}
-            gone = tuple(sorted(classes - {MethodName.owner(method) for method in version.methods}))
+            lost: tuple[str, ...] = ()
+            gone: tuple[str, ...] = ()
+
+            # The reference may list its methods for another pair, so only a listed version gets what it lost.
+            if pair.methods:
+                lost = tuple(sorted(base.methods - version.methods))
+                classes = {MethodName.owner(method) for method in base.methods}
+                gone = tuple(sorted(classes - {MethodName.owner(method) for method in version.methods}))
             result[pair.name] = CodeKept(both, base.covered, lost, gone)
         return result
 

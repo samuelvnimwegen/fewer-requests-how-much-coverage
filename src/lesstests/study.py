@@ -207,10 +207,7 @@ class StudyReport:
             "|---|---:|---|" + "---:|" * len(columns),
             f"| 100% | {self._result['tests']} | Full suite | " + " | ".join(full) + " |",
         ]
-        for budget in sorted({version["budget"] for version in self._result["versions"]}, reverse=True):
-            versions = [version for version in self._result["versions"] if version["budget"] == budget]
-            selected = next(version for version in versions if version["version"] == "selected")
-            drawn = [version for version in versions if version["version"] == "random"]
+        for budget, selected, drawn in self._by_budget():
             label = Budget(budget).label
             lost = [str(selected["lost"][key]) for key in keys] + [str(selected["requests"])]
             lines.append(f"| {label} | {selected['kept']} | Selected | " + " | ".join(lost) + " |")
@@ -235,7 +232,7 @@ class StudyReport:
         """
         versions = self._result["versions"]
         reference = CodeKept.from_dict(versions[0]["code"]).reference
-        full = [f"{getattr(reference, kind)}" for kind in CodeKept.KINDS]
+        full = [str(reference.of(kind)) for kind in CodeKept.KINDS]
         lines = [
             "## Server code kept per budget",
             "",

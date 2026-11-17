@@ -275,8 +275,9 @@ def test_the_recorder_keeps_the_suites_order(tmp_path: Path, upstream: Address) 
 class FakeCode:
     """Logs the code coverage calls next to the service's, and writes each dump as a file."""
 
-    def __init__(self, calls: list[str]) -> None:
+    def __init__(self, calls: list[str], recording: Recording | None = None) -> None:
         self.calls = calls
+        self.recording = recording
 
     @property
     def on(self) -> bool:
@@ -287,6 +288,10 @@ class FakeCode:
 
     def dump(self, path: Path) -> None:
         self.calls.append(f"dump {path.name}")
+
+        # A record saved before its dump would look finished to a resume that never got the dump.
+        if self.recording is not None:
+            assert not (self.recording.tests_folder / f"{path.stem}.json").exists()
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("dump")
 
@@ -309,7 +314,8 @@ def test_the_code_counters_start_from_zero_after_every_reset_and_dump_after_ever
     proxy = RecordingProxy(Address("127.0.0.1", 0), upstream)
     service = FakeService(upstream, proxy)
     runner = FakeRunner(tmp_path, proxy, service.calls)
-    Recorder(_suite(tmp_path), runner, service, proxy, recording, EveryClass(), FakeCode(service.calls)).run({})
+    code = FakeCode(service.calls, recording)
+    Recorder(_suite(tmp_path), runner, service, proxy, recording, EveryClass(), code).run({})
 
     # One class, so one reset. The dump of a test comes before the next test runs.
     assert service.calls == [

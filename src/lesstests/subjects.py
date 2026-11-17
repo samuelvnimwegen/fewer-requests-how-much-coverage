@@ -609,6 +609,7 @@ FINERACT = ServerSubject(
     test_env={"FINERACT_TEST_EXTERNAL_HOST": "host.docker.internal"},
     reset_policy=EveryClass(),
     timeouts=Timeouts(test=1800.0, suite=12 * 3600.0, request=600.0),
+    # The most frequent jobs run every minute, 10 minutes and 15 minutes, so 16 minutes alone sees each of them.
     server_code=ServerCode(
         "org.apache.fineract", ("/app/classes", "/app/libs/fineract-*.jar"), port=8093, idle_seconds=16 * 60.0
     ),

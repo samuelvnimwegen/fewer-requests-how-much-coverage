@@ -238,12 +238,23 @@ class FakeCode:
         return {"code_coverage": self._on}
 
 
+class LoggingRunner(FakeRunner):
+    def __init__(self, log: FakeLog, calls: list[str]) -> None:
+        super().__init__(log)
+        self.calls = calls
+
+    def run_suite(self, tests: list[JavaTest], name: str) -> SuiteRun:
+        self.calls.append(f"run {name}")
+        return super().run_suite(tests, name)
+
+
 def _bench_with(tmp_path: Path, code: FakeCode) -> Benchmark:
     spec = tmp_path / "spec.json"
     spec.write_text(json.dumps(SPEC))
     log = FakeLog()
     measure = (FakeRestCov(), ApiDescription.load(spec))
-    return Benchmark(_plan(), FakeRunner(log), contextlib.nullcontext(), log, FakeService(), measure, code)
+    runner = LoggingRunner(log, code.calls)
+    return Benchmark(_plan(), runner, contextlib.nullcontext(), log, FakeService(), measure, code)
 
 
 def test_every_run_starts_its_code_counters_from_zero_and_dumps_them(tmp_path: Path) -> None:
@@ -251,12 +262,16 @@ def test_every_run_starts_its_code_counters_from_zero_and_dumps_them(tmp_path: P
     _bench_with(tmp_path, code).run(tmp_path / "bench", rounds=1, warmup=1)
     assert code.calls == [
         "clear",
+        "run testng/warmup-1",
         "dump warmup-1.exec",
         "clear",
+        "run testng/round-1-original",
         "dump round-1-original.exec",
         "clear",
+        "run testng/round-1-select",
         "dump round-1-select.exec",
         "clear",
+        "run testng/round-1-select-merge",
         "dump round-1-select-merge.exec",
     ]
 
@@ -292,7 +307,11 @@ def test_the_report_adds_the_code_each_version_kept_of_its_rounds_original(tmp_p
             ("Select", 2): kept(90),
             **{("Select + Merge", number): kept(50) for number in (1, 2)},
         },
-        {number: CodeKept(CodeCounts(95, 40, 20), CodeCounts(100, 40, 20)) for number in (1, 2)},
+        {
+            1: CodeKept(CodeCounts(90, 40, 20), CodeCounts(100, 40, 20)),
+            2: CodeKept(CodeCounts(99, 40, 20), CodeCounts(100, 40, 20)),
+            3: CodeKept(CodeCounts(95, 40, 20), CodeCounts(100, 40, 20)),
+        },
     )
     report = BenchReport(_plan(), runs, 0, code).markdown()
     assert "| Lines kept | Branches kept | Methods kept |" in report

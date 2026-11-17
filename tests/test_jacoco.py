@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from lesstests import jacoco as jacoco_module
 from lesstests.jacoco import (
     AgentCoverage,
     CodeCounter,
@@ -183,6 +184,9 @@ def test_lost_methods_and_classes_are_listed_on_request(tmp_path: Path) -> None:
     assert kept["listed"].lost_classes == ("a.B", "a.C$1")
     assert kept["quiet"].kept == kept["listed"].kept
 
+    # The reference lists its methods for `listed`, which must not make `quiet` lose them all.
+    assert (kept["quiet"].lost_methods, kept["quiet"].lost_classes) == ((), ())
+
 
 def test_a_method_name_keeps_its_class_even_with_dots_in_the_descriptor() -> None:
     assert MethodName.owner("org.x.Pet.name(Ljava/lang/String;)Lorg/x/Pet;") == "org.x.Pet"
@@ -301,3 +305,117 @@ def test_a_class_without_a_file_is_named_but_still_counted(tmp_path: Path) -> No
     count = CodeCounter._read(out)["g0"]
     assert count.missing == {"org/x/Gone"}
     assert count.covered == CodeCounts(1, 0, 1)
+
+
+def test_a_dump_replaces_an_older_one_and_resets_the_counters(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[list[str]] = []
+    target = tmp_path / "exec" / "t.exec"
+    target.parent.mkdir()
+    target.write_text("old session")
+
+    def run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        assert not target.exists()
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(jacoco_module.subprocess, "run", run)
+    JaCoCo(Path("/j")).dump(8083, target)
+    command = calls[0]
+    assert command[:4] == ["java", "-jar", "/j/jacococli.jar", "dump"]
+    assert command[command.index("--address") + 1] == "127.0.0.1"
+    assert command[command.index("--port") + 1] == "8083"
+    assert command[command.index("--destfile") + 1] == str(target)
+    assert "--reset" in command
+    assert 1 <= int(command[command.index("--retry") + 1]) <= 10
+
+
+def test_the_report_merges_into_a_fresh_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    merged = tmp_path / "report.exec"
+    merged.write_text("old sessions")
+    xml = tmp_path / "report.xml"
+
+    def run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if command[3] == "merge":
+            assert not merged.exists()
+        else:
+            xml.write_text("<report/>")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(jacoco_module.subprocess, "run", run)
+    assert JaCoCo(Path("/j")).report([tmp_path / "a.exec"], [tmp_path / "classes"], xml).tag == "report"
+
+
+def test_classes_copied_once_are_not_copied_again(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    copied: list[Path] = []
+    monkeypatch.setattr(ServerClasses, "copy", lambda self, target: copied.append(target))
+    agent = AgentCoverage(FINERACT_CODE, FakeJaCoCo(tmp_path), "image")
+    agent.classes(tmp_path / "new")
+    (tmp_path / "old").mkdir()
+    agent.classes(tmp_path / "old")
+    assert copied == [tmp_path / "new"]
+
+
+def test_an_image_without_the_class_locations_stops_the_copy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    removed: list[str] = []
+
+    def run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if command[1] == "rm":
+            removed.append(command[2])
+        return subprocess.CompletedProcess(command, 0, "abc123\n", "")
+
+    class Export:
+        def __init__(self, command: list[str], stdout: object) -> None:
+            self.stdout = _tar("app/resources/application.properties")
+            self.returncode = 0
+
+        def __enter__(self) -> "Export":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            pass
+
+    monkeypatch.setattr(jacoco_module.subprocess, "run", run)
+    monkeypatch.setattr(jacoco_module.subprocess, "Popen", Export)
+    with pytest.raises(RuntimeError, match="has none of /app/classes"):
+        ServerClasses(FINERACT_CODE, "fineract:1").copy(tmp_path / "classes")
+    assert removed == ["abc123"]
+    assert not (tmp_path / "classes").exists()
+
+
+def _compile_and_run(tmp_path: Path, jacoco: JaCoCo, source: str, name: str, argument: str) -> tuple[Path, Path]:
+    """Compile App from `source` into its own folder and run it once with the agent.
+
+    Returns:
+        The class folder and the dump.
+    """
+    folder = tmp_path / name
+    java = folder / "src" / "demo" / "App.java"
+    java.parent.mkdir(parents=True)
+    java.write_text(source)
+    classes = folder / "classes"
+    subprocess.run(["javac", "-g", "-d", str(classes), str(java)], check=True)
+    dump = folder / f"{argument}.exec"
+    agent = f"-javaagent:{jacoco.agent}=destfile={dump},includes=demo.*"
+    subprocess.run(["java", agent, "-cp", str(classes), "demo.App", argument], check=True)
+    return classes, dump
+
+
+@pytest.mark.skipif(not os.environ.get("LESSTESTS_JACOCO"), reason="needs LESSTESTS_JACOCO and a JDK")
+def test_a_dump_of_another_build_stops_the_count_even_next_to_one_of_this_build(tmp_path: Path) -> None:
+    jacoco = JaCoCo.at(Path(os.environ["LESSTESTS_JACOCO"]))
+    _, old = _compile_and_run(tmp_path, jacoco, APP, "old", "pos")
+    rebuilt = APP.replace("return 2;", "return 3;")
+    classes, new = _compile_and_run(tmp_path, jacoco, rebuilt, "new", "neg")
+    counter = CodeCounter(jacoco, [classes], "demo/", None)
+    with pytest.raises(ValueError, match="1 class files differ from what the server ran, such as demo/App"):
+        counter.kept([KeptPair("both", (old, new), (new,))])
+
+
+@pytest.mark.skipif(not os.environ.get("LESSTESTS_JACOCO"), reason="needs LESSTESTS_JACOCO and a JDK")
+def test_an_empty_dump_stops_the_count(tmp_path: Path) -> None:
+    jacoco = JaCoCo.at(Path(os.environ["LESSTESTS_JACOCO"]))
+    classes, dump = _compile_and_run(tmp_path, jacoco, APP, "app", "pos")
+    empty = tmp_path / "empty.exec"
+    empty.write_bytes(b"")
+    with pytest.raises(RuntimeError, match="is empty"):
+        CodeCounter(jacoco, [classes], "demo/", None).kept([KeptPair("e", (empty,), (dump,))])

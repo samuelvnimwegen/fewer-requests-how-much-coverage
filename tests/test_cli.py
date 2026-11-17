@@ -243,6 +243,10 @@ class FakeBenchmark:
     def repeated(out: Path) -> int:
         return 0
 
+    @staticmethod
+    def dumps(out: Path, runs: list[Any]) -> dict[Any, Path]:
+        return {}
+
 
 class FakeBenchReport:
     def __init__(self, plan: Any, runs: list[Any], repeated: int = 0, code: Any = None) -> None:
@@ -468,8 +472,13 @@ def test_record_with_code_coverage_needs_jacoco(tmp_path: Path, monkeypatch: pyt
         cli.main([*args, "--code-coverage"])
 
 
-def test_bench_without_code_coverage_runs_no_agent_even_for_a_recording_with_it(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+class FakeRecordingCode:
+    jacoco = jacoco.JaCoCo(Path("/j"))
+
+
+@pytest.mark.parametrize("flag", [True, False])
+def test_bench_runs_the_agent_for_a_recording_with_code_coverage_unless_told_not_to(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, flag: bool
 ) -> None:
     folder = tmp_path / "plan"
     folder.mkdir()
@@ -481,6 +490,24 @@ def test_bench_without_code_coverage_runs_no_agent_even_for_a_recording_with_it(
     monkeypatch.setattr(subjects, "JvmRunner", FakeRunner)
     monkeypatch.setattr(cli, "Benchmark", FakeBenchmark)
     monkeypatch.setattr(cli, "BenchReport", FakeBenchReport)
+    monkeypatch.setattr(
+        cli.JaCoCoOption, "recording_code", classmethod(lambda cls, args, recording: FakeRecordingCode())
+    )
+    monkeypatch.setattr(cli.BenchCode, "count", classmethod(lambda cls, code, dumps, original: cli.BenchCode({}, {})))
     FakeBenchmark.made.clear()
-    cli.main(["bench", "--plan", str(folder), "--rounds", "1", "--restcov", "r.py", "--no-code-coverage"])
-    assert not FakeBenchmark.made[0].code.on
+    args = ["bench", "--plan", str(folder), "--rounds", "1", "--restcov", "r.py"]
+    cli.main([*args, "--no-code-coverage"] if flag else args)
+    assert FakeBenchmark.made[0].code.on is not flag
+
+
+def test_every_command_on_a_recording_with_code_coverage_checks_the_helper_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recording = Recording(tmp_path / "rec")
+    recording.write_meta({"subject": "petstore", "code_coverage": True})
+    checked: list[bool] = []
+    monkeypatch.setattr(cli.RecordingCode, "__init__", lambda self, recordings, jacoco, code: None)
+    monkeypatch.setattr(cli.RecordingCode, "check", lambda self: checked.append(True))
+    args = cli.argparse.Namespace(jacoco=_jacoco_folder(tmp_path))
+    assert cli.JaCoCoOption.recording_code(args, recording) is not None
+    assert checked == [True]

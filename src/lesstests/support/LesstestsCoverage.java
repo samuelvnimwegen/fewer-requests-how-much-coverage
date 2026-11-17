@@ -25,6 +25,7 @@ import org.jacoco.cli.internal.core.analysis.IClassCoverage;
 import org.jacoco.cli.internal.core.analysis.IMethodCoverage;
 import org.jacoco.cli.internal.core.data.ExecutionData;
 import org.jacoco.cli.internal.core.data.ExecutionDataStore;
+import org.jacoco.cli.internal.core.internal.data.CRC64;
 import org.jacoco.cli.internal.core.tools.ExecFileLoader;
 
 /**
@@ -34,9 +35,11 @@ import org.jacoco.cli.internal.core.tools.ExecFileLoader;
  * org.jacoco.cli.internal.core. "count JOB OUT" reads a job of tab separated lines and writes one line per group to
  * OUT. The job names the class folders and jars, the package to count, an optional idle file, and the groups with
  * their exec files. A group joins its files, so a probe counts when any file hit it. A masked group then drops the
- * probes the idle file hit. Lines and branches are counted per source file, like JaCoCo's own report. A class whose
- * file differs from the one the server ran gets a "nomatch" line, and a class that ran without any file a "missing"
- * line, leaving out the classes Spring and Hibernate make at runtime.
+ * probes the idle file hit. Lines and branches are counted per source file, like JaCoCo's own report. A group asked
+ * for its methods gets one "method" line per covered method. A class whose file differs from one the server ran
+ * gets a "nomatch" line, even when another dump of the group ran the same file, and a class that ran without any
+ * file gets a "missing" line, leaving out the classes Spring and Hibernate make at runtime. An empty exec file
+ * stops the count, since a dump always holds a header.
  */
 public final class LesstestsCoverage {
 
@@ -65,7 +68,7 @@ public final class LesstestsCoverage {
                 }
                 IBundleCoverage bundle = coverage.analyze(joined);
                 out.println(String.join("\t", "group", group.name, Counts.of(bundle).with(totals)));
-                for (String name : coverage.problems(joined, bundle)) {
+                for (String name : coverage.problems(joined)) {
                     out.println(String.join("\t", name, group.name));
                 }
                 if (group.methods) {
@@ -116,6 +119,9 @@ public final class LesstestsCoverage {
         Map<Long, Probes> cached = files.get(file);
         if (cached != null) {
             return cached;
+        }
+        if (Files.size(file) == 0) {
+            throw new IllegalStateException("The exec file " + file + " is empty");
         }
         ExecFileLoader loader = new ExecFileLoader();
         loader.load(file.toFile());
@@ -168,23 +174,24 @@ public final class LesstestsCoverage {
         return builder.getBundle("server");
     }
 
-    /** Name the classes JaCoCo couldn't match, as "nomatch NAME" or "missing NAME". */
-    private List<String> problems(Map<Long, Probes> joined, IBundleCoverage bundle) {
-        List<String> problems = new ArrayList<>();
-        bundle.getPackages().forEach(pkg -> {
-            for (IClassCoverage type : pkg.getClasses()) {
-                if (type.isNoMatch()) {
-                    problems.add("nomatch\t" + type.getName());
-                }
-            }
-        });
+    /**
+     * Name the classes JaCoCo couldn't match, as "nomatch NAME" or "missing NAME". JaCoCo ids a class by a checksum
+     * of its bytes, and its analyzer quietly skips any other id with the same name, so every id gets compared here.
+     */
+    private List<String> problems(Map<Long, Probes> joined) {
+        Set<String> unmatched = new TreeSet<>();
         Set<String> missing = new TreeSet<>();
-        for (Probes probes : joined.values()) {
-            if (!classes.containsKey(probes.name) && !probes.name.contains("$$")
-                && !probes.name.contains("$HibernateProxy$")) {
-                missing.add(probes.name);
+        for (Map.Entry<Long, Probes> entry : joined.entrySet()) {
+            String name = entry.getValue().name;
+            byte[] bytes = classes.get(name);
+            if (bytes != null && CRC64.classId(bytes) != entry.getKey()) {
+                unmatched.add(name);
+            } else if (bytes == null && !name.contains("$$") && !name.contains("$HibernateProxy$")) {
+                missing.add(name);
             }
         }
+        List<String> problems = new ArrayList<>();
+        unmatched.forEach(name -> problems.add("nomatch\t" + name));
         missing.forEach(name -> problems.add("missing\t" + name));
         return problems;
     }

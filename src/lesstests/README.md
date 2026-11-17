@@ -35,7 +35,7 @@ JAVA_HOME=/path/to/jdk-25 VERSIONING_DISABLE=true ./gradlew :fineract-provider:j
 
 Fineract runs from `fineract-local:feb1ba4` next to `postgres:18.3`, on a Docker network of their own. The proxy takes port 8091 and Fineract port 8092. Tests that need LocalStack or the OAuth2 mock server of Fineract's CI fail, since the tool only starts Fineract and Postgres.
 
-Code coverage needs the `lib` folder of a JaCoCo release with `jacocoagent.jar` and `jacococli.jar` (0.8.14 or newer, for Fineract's Java 25 classes), given with `--jacoco` or `LESSTESTS_JACOCO`, and `java` 11 or newer on the PATH for the helper. The agent takes host port 8083 for PetStore and 8093 for Fineract. Google Drive has no code coverage, since its server isn't ours to run.
+Code coverage needs the `lib` folder of a JaCoCo release with `jacocoagent.jar` and `jacococli.jar` (0.8.14 or newer, for Fineract's Java 25 classes), given with `--jacoco` or `LESSTESTS_JACOCO`. The helper runs on the `java` on the PATH, which needs to be 16 or newer, so the Java 21 above works. The agent takes host port 8083 for PetStore and 8093 for Fineract. Google Drive has no code coverage, since its server isn't ours to run.
 
 Google Drive needs an OAuth client of a Google account you don't mind losing data in. The tests create files and empty the Drive trash. Put `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` and `GOOGLE_REFRESH_TOKEN` in a file only you can read and pass it with `--env-file`. The Drive client prints its token request and every access token it gets, so the tool replaces every bearer token and every value of 8 characters or more from that file with `<redacted>` in the TestNG console logs it keeps. The proxy takes port 8089. Its certificate authority lives in `~/.cache/lesstests/ca`.
 

@@ -128,7 +128,7 @@ class CodeShare:
         Returns:
             The cell text.
         """
-        return f"{getattr(kept.kept, kind)} of {getattr(kept.reference, kind)} ({kept.share(kind):.1%})"
+        return f"{kept.kept.of(kind)} of {kept.reference.of(kind)} ({kept.share(kind):.1%})"
 
 
 class VersionPlanner:
