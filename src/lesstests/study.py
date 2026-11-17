@@ -1,10 +1,12 @@
 import json
 import statistics
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from lesstests.code_coverage import RecordingCode
 from lesstests.coverage import CoverageSet, Criterion, RestCov, SuiteCoverage
+from lesstests.jacoco import CodeKept
 from lesstests.java import JavaTest, Outcome
 from lesstests.recording import Recording
 from lesstests.selection import Budget, CoverageMatrix, CoverageSelector, RandomSelector, Selector
@@ -20,6 +22,12 @@ class SmallerSuite:
     tests: list[JavaTest]
     coverage: CoverageSet
     requests: int
+    code: CodeKept | None = None
+
+    @property
+    def name(self) -> str:
+        """Name the version for its folders, like `selected-75-0` or `random-50-12`."""
+        return f"{self.version}-{self.budget.label.rstrip('%')}-{self.draw}"
 
     def lost(self, full: CoverageSet) -> dict[str, int]:
         """Count the items the full suite reaches and this version misses, per criterion and in total.
@@ -44,6 +52,7 @@ class SmallerSuite:
             "requests": self.requests,
             "covered": {**self.coverage.counts(), "all": len(self.coverage)},
             "lost": self.lost(full),
+            **({"code": self.code.to_dict()} if self.code else {}),
             "tests": [test.id for test in self.tests],
         }
 
@@ -64,8 +73,11 @@ class SelectionStudy:
         draws: int,
         seed: int,
         passing_only: bool = False,
+        code: RecordingCode | None = None,
     ) -> None:
         """Set up the study. With `passing_only`, both selectors pick only from tests that passed alone.
+
+        With `code`, every smaller suite also gets the server code it keeps, and Selected the methods it lost.
 
         Raises:
             ValueError: If two budgets share a label, since they would write to the same folders.
@@ -80,6 +92,7 @@ class SelectionStudy:
         self._draws = draws
         self._seed = seed
         self._passing_only = passing_only
+        self._code = code
 
     def run(self, out: Path) -> list[SmallerSuite]:
         """Build every smaller suite, measure it and write the results to `out`.
@@ -98,8 +111,21 @@ class SelectionStudy:
             for draw in range(1, self._draws + 1):
                 selector = RandomSelector(RandomSelector.seed_for(self._seed, budget, draw))
                 suites.append(self._build(selector, matrix, budget, draw, size, requests, out))
+        if self._code is not None:
+            suites = self._with_code(self._code, [record.test for record in records], suites)
         self._write(out, len(records), sum(requests.values()), len(pool), suites)
         return suites
+
+    @staticmethod
+    def _with_code(code: RecordingCode, full: list[JavaTest], suites: list[SmallerSuite]) -> list[SmallerSuite]:
+        """Count the server code of every smaller suite in one go, and list what Selected lost.
+
+        Returns:
+            The suites with their code.
+        """
+        listed = frozenset(suite.name for suite in suites if suite.version == CoverageSelector().name)
+        kept = code.kept({suite.name: suite.tests for suite in suites}, full, listed)
+        return [replace(suite, code=kept[suite.name]) for suite in suites]
 
     def _build(
         self,
@@ -113,12 +139,12 @@ class SelectionStudy:
     ) -> SmallerSuite:
         tests = selector.select(matrix, size)
         joined = self._coverage.of(tests)
-        name = f"{selector.name}-{budget.label.rstrip('%')}-{draw}"
-        logs = self._recording.gather_logs(tests, out / "logs" / name)
-        measured = self._restcov.measure(logs, out / "restcov" / name).items()
+        suite = SmallerSuite(selector.name, budget, draw, tests, joined, sum(requests[test] for test in tests))
+        logs = self._recording.gather_logs(tests, out / "logs" / suite.name)
+        measured = self._restcov.measure(logs, out / "restcov" / suite.name).items()
         if measured != joined:
-            raise ValueError(f"RESTCov and the joined items differ for {name}")
-        return SmallerSuite(selector.name, budget, draw, tests, joined, sum(requests[test] for test in tests))
+            raise ValueError(f"RESTCov and the joined items differ for {suite.name}")
+        return suite
 
     def _write(self, out: Path, records_count: int, requests: int, pool: int, suites: list[SmallerSuite]) -> None:
         full = self._coverage.full
@@ -135,7 +161,12 @@ class SelectionStudy:
         }
         out.mkdir(parents=True, exist_ok=True)
         (out / "selection.json").write_text(json.dumps(result, indent=1), encoding="utf-8")
-        (out / "report.md").write_text(StudyReport(result).markdown(), encoding="utf-8")
+        report = StudyReport(result)
+        (out / "report.md").write_text(report.markdown(), encoding="utf-8")
+        lost = out / "code-lost.md"
+        lost.unlink(missing_ok=True)
+        if report.has_code:
+            lost.write_text(report.code_lost(), encoding="utf-8")
 
 
 class StudyReport:
@@ -187,7 +218,88 @@ class StudyReport:
                 spread = [self._spread([version["lost"][key] for version in drawn]) for key in keys]
                 spread.append(self._spread([version["requests"] for version in drawn]))
                 lines.append(f"| {label} | {selected['kept']} | Random | " + " | ".join(spread) + " |")
+        if self.has_code:
+            lines += ["", *self._code_table()]
         return "\n".join(lines) + "\n"
+
+    @property
+    def has_code(self) -> bool:
+        """Whether the versions carry server code coverage."""
+        return any("code" in version for version in self._result["versions"])
+
+    def _code_table(self) -> list[str]:
+        """Write the server code each version keeps of the full suite.
+
+        Returns:
+            The table lines.
+        """
+        versions = self._result["versions"]
+        reference = CodeKept.from_dict(versions[0]["code"]).reference
+        full = [f"{getattr(reference, kind)}" for kind in CodeKept.KINDS]
+        lines = [
+            "## Server code kept per budget",
+            "",
+            "Counted by JaCoCo on the server, without the code the server runs on its own when no test runs. The full "
+            "suite row counts what all tests cover. Every other row gives the share of that the version keeps. "
+            "Classes lost counts the classes where Selected reaches none of the methods the full suite reached, and "
+            "`code-lost.md` names them and every lost method.",
+            "",
+            "| Budget | Kept | Version | Lines | Branches | Methods | Classes lost | Methods lost |",
+            "|---|---:|---|---:|---:|---:|---:|---:|",
+            f"| 100% | {self._result['tests']} | Full suite | " + " | ".join(full) + " |  |  |",
+        ]
+        for budget, selected, drawn in self._by_budget():
+            label = Budget(budget).label
+            code = CodeKept.from_dict(selected["code"])
+            kept = [f"{code.share(kind):.1%}" for kind in CodeKept.KINDS]
+            kept += [str(len(code.lost_classes)), str(len(code.lost_methods))]
+            lines.append(f"| {label} | {selected['kept']} | Selected | " + " | ".join(kept) + " |")
+            if drawn:
+                shares = [
+                    [CodeKept.from_dict(version["code"]).share(kind) for version in drawn] for kind in CodeKept.KINDS
+                ]
+                spread = [self._share_spread(values) for values in shares]
+                lines.append(f"| {label} | {selected['kept']} | Random | " + " | ".join(spread) + " |  |  |")
+        return lines
+
+    def code_lost(self) -> str:
+        """List the classes and methods each Selected version lost against the full suite.
+
+        Returns:
+            The list as Markdown.
+        """
+        lines = ["# Server code Selected lost", ""]
+        for budget, selected, _ in self._by_budget():
+            code = CodeKept.from_dict(selected["code"])
+            lines += [
+                f"## {Budget(budget).label}, {selected['kept']} tests",
+                "",
+                f"{len(code.lost_classes)} classes lost every method the full suite reached, and "
+                f"{len(code.lost_methods)} methods are no longer reached.",
+                "",
+                "### Classes",
+                "",
+                *(f"* `{name}`" for name in code.lost_classes),
+                "",
+                "### Methods",
+                "",
+                *(f"* `{name}`" for name in code.lost_methods),
+                "",
+            ]
+        return "\n".join(lines)
+
+    def _by_budget(self) -> list[tuple[float, dict[str, Any], list[dict[str, Any]]]]:
+        versions = self._result["versions"]
+        found = []
+        for budget in sorted({version["budget"] for version in versions}, reverse=True):
+            mine = [version for version in versions if version["budget"] == budget]
+            selected = next(version for version in mine if version["version"] == "selected")
+            found.append((budget, selected, [version for version in mine if version["version"] == "random"]))
+        return found
+
+    @staticmethod
+    def _share_spread(values: list[float]) -> str:
+        return f"{statistics.mean(values):.1%} ({min(values):.1%}, {max(values):.1%})"
 
     @staticmethod
     def _spread(values: list[int]) -> str:

@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 from fake_restcov import FakeRestCov
 
-from lesstests import cli, subjects
+from lesstests import cli, jacoco, subjects
 from lesstests.exchange import Body, Exchange, Headers, HttpRequest, HttpResponse
 from lesstests.java import JavaTest, MavenProject, Outcome
 from lesstests.recording import RecordedTest, Recording
@@ -120,12 +120,20 @@ class FakeRecorder:
     made: list["FakeRecorder"] = []
 
     def __init__(
-        self, suite: Any, runner: Any, service: Any, proxy: Any, recording: Recording, reset: Any = None
+        self,
+        suite: Any,
+        runner: Any,
+        service: Any,
+        proxy: Any,
+        recording: Recording,
+        reset: Any = None,
+        code: Any = None,
     ) -> None:
         self.suite = suite
         self.service = service
         self.recording = recording
         self.reset = reset
+        self.code = code
         self.meta: dict[str, Any] = {}
         self.tests: list[Any] | None = None
         FakeRecorder.made.append(self)
@@ -216,9 +224,13 @@ def test_merge_without_merges_still_compiles_the_project_and_plans_three_version
 class FakeBenchmark:
     made: list["FakeBenchmark"] = []
 
-    def __init__(self, plan: Any, runner: Any, proxy: Any, log: Any, service: Any, measure: Any) -> None:
+    def __init__(
+        self, plan: Any, runner: Any, proxy: Any, log: Any, service: Any, measure: Any, code: Any = None
+    ) -> None:
         self.plan = plan
         self.runner = runner
+        self.service = service
+        self.code = code
         self.args: tuple[Any, ...] = ()
         FakeBenchmark.made.append(self)
 
@@ -233,7 +245,7 @@ class FakeBenchmark:
 
 
 class FakeBenchReport:
-    def __init__(self, plan: Any, runs: list[Any], repeated: int = 0) -> None:
+    def __init__(self, plan: Any, runs: list[Any], repeated: int = 0, code: Any = None) -> None:
         pass
 
     def markdown(self) -> str:
@@ -405,3 +417,70 @@ def test_plan_writes_original_and_select_and_points_bench_at_the_recordings_copy
     FakeBenchmark.made.clear()
     cli.main(["bench", "--plan", str(out), "--rounds", "3", "--restcov", "restcov.py"])
     assert FakeBenchmark.made[0].runner.project.workdir == recording.folder.resolve() / "project"
+
+
+def _jacoco_folder(tmp_path: Path) -> Path:
+    folder = tmp_path / "jacoco"
+    folder.mkdir()
+    (folder / "jacocoagent.jar").write_text("")
+    (folder / "jacococli.jar").write_text("")
+    return folder
+
+
+def test_record_with_code_coverage_runs_the_agent_copies_the_classes_and_says_so_in_the_facts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(subjects, "MavenProject", FakeMaven)
+    monkeypatch.setattr(cli, "Recorder", FakeRecorder)
+    copied: list[Path] = []
+    monkeypatch.setattr(jacoco.AgentCoverage, "classes", lambda self, target: copied.append(target))
+    FakeRecorder.made.clear()
+    out = tmp_path / "rec"
+    args = ["record", "--project", str(tmp_path / "petstore"), "--suite", "multi-agent", "--out", str(out)]
+    cli.main([*args, "--code-coverage", "--jacoco", str(_jacoco_folder(tmp_path))])
+
+    recorder = FakeRecorder.made[0]
+    assert recorder.code.facts() == {"code_coverage": True}
+    assert copied == [out.resolve() / "code-coverage" / "classes"]
+
+
+def test_record_without_the_flag_keeps_the_facts_as_before(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(subjects, "MavenProject", FakeMaven)
+    monkeypatch.setattr(cli, "Recorder", FakeRecorder)
+    FakeRecorder.made.clear()
+    cli.main(["record", "--project", str(tmp_path / "p"), "--suite", "multi-agent", "--out", str(tmp_path / "rec")])
+    assert "code_coverage" not in FakeRecorder.made[0].meta
+    assert not FakeRecorder.made[0].code.on
+
+
+def test_record_with_code_coverage_on_a_live_api_stops_with_a_message(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    args = ["record", "--subject", "google-drive", "--project", str(tmp_path), "--suite", "multi-agent"]
+    with pytest.raises(SystemExit, match="google-drive has no server"):
+        cli.main([*args, "--out", str(tmp_path / "rec"), "--code-coverage", "--jacoco", str(_jacoco_folder(tmp_path))])
+
+
+def test_record_with_code_coverage_needs_jacoco(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("LESSTESTS_JACOCO", raising=False)
+    args = ["record", "--project", str(tmp_path), "--suite", "multi-agent", "--out", str(tmp_path / "rec")]
+    with pytest.raises(SystemExit, match="LESSTESTS_JACOCO"):
+        cli.main([*args, "--code-coverage"])
+
+
+def test_bench_without_code_coverage_runs_no_agent_even_for_a_recording_with_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder = tmp_path / "plan"
+    folder.mkdir()
+    (tmp_path / "spec.json").write_text(json.dumps({"openapi": "3.0.0", "paths": {}}))
+    meta = {"subject": "petstore", "spec": str(tmp_path / "spec.json"), "code_coverage": True}
+    (folder / "meta.json").write_text(json.dumps({**meta, "project": str(tmp_path), "recording": str(tmp_path / "r")}))
+    (folder / "plan.json").write_text(json.dumps({"versions": []}))
+    monkeypatch.setattr(cli, "RestCov", lambda *args, **kwargs: FakeRestCov())
+    monkeypatch.setattr(subjects, "JvmRunner", FakeRunner)
+    monkeypatch.setattr(cli, "Benchmark", FakeBenchmark)
+    monkeypatch.setattr(cli, "BenchReport", FakeBenchReport)
+    FakeBenchmark.made.clear()
+    cli.main(["bench", "--plan", str(folder), "--rounds", "1", "--restcov", "r.py", "--no-code-coverage"])
+    assert not FakeBenchmark.made[0].code.on

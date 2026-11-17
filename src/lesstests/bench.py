@@ -12,8 +12,10 @@ from typing import Any, Protocol, Self, cast
 from scipy.stats import wilcoxon
 
 from lesstests.api import ApiDescription, ValueItem
+from lesstests.code_coverage import BenchCode
 from lesstests.coverage import CoverageSet, RestCov
 from lesstests.exchange import Exchange
+from lesstests.jacoco import CodeKept, NoServerCoverage, ServerCoverage
 from lesstests.java import JavaTest, SuiteRun
 from lesstests.recording import RestCovLogFolder
 from lesstests.service import Service
@@ -124,14 +126,16 @@ class Benchmark:
         log: ExchangeSource,
         service: Service,
         measure: tuple[RestCov, ApiDescription],
+        code: ServerCoverage | None = None,
     ) -> None:
-        """Wire the parts. The proxy is entered once for the whole benchmark."""
+        """Wire the parts. The proxy is entered once for the whole benchmark. Without `code`, no JaCoCo agent runs."""
         self._plan = plan
         self._runner = runner
         self._proxy = proxy
         self._log = log
         self._service = service
         self._restcov, self._api = measure
+        self._code = code or NoServerCoverage()
 
     def run(
         self, out: Path, rounds: int, warmup: int = 1, progress: Callable[[BenchRun], None] | None = None
@@ -172,17 +176,26 @@ class Benchmark:
         return runs
 
     def _claim(self, out: Path) -> None:
-        """Tie the folder to this plan, so saved runs of another plan never end up in its report.
+        """Tie the folder to this plan and to whether the agent runs, so saved runs never mix with other ones.
+
+        A folder from before code coverage has no `agent.json`, and its runs had no agent.
 
         Raises:
-            ValueError: If the folder holds runs of another plan.
+            ValueError: If the folder holds runs of another plan, or runs with the agent switched the other way.
         """
         path = out / "runs" / "plan.json"
         tests = {version.name: [test.id for test in version.tests] for version in self._plan.versions}
         if path.exists() and json.loads(path.read_text(encoding="utf-8")) != tests:
             raise ValueError(f"{out} holds runs of another plan. Pick a new --out")
+        agent = out / "runs" / "agent.json"
+        if path.exists():
+            before = json.loads(agent.read_text(encoding="utf-8"))["code_coverage"] if agent.exists() else False
+            if before != self._code.on:
+                said = "with" if before else "without"
+                raise ValueError(f"{out} holds runs {said} the JaCoCo agent. Pick a new --out")
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(tests, indent=1), encoding="utf-8")
+        agent.write_text(json.dumps({"code_coverage": self._code.on}), encoding="utf-8")
 
     @staticmethod
     def repeated(out: Path) -> int:
@@ -220,12 +233,14 @@ class Benchmark:
 
     def _once(self, version: SuiteVersion, number: int, position: int, out: Path) -> BenchRun:
         self._service.reset()
+        self._code.clear()
 
         # A late answer from the previous run must not end up in this one.
         self._log.take()
         name = self._name(version, number)
         result = self._runner.run_suite(version.tests, f"testng/{name}")
         exchanges, errors = self._log.take()
+        self._code.dump(self.dump_path(out, name))
         logs = RestCovLogFolder(out / "logs" / name).write(exchanges)
         coverage = self._restcov.measure(logs, out / "restcov" / name).items()
         return BenchRun(
@@ -242,7 +257,34 @@ class Benchmark:
         )
 
     @staticmethod
-    def _name(version: SuiteVersion, number: int) -> str:
+    def dump_path(out: Path, name: str) -> Path:
+        """Find the JaCoCo dump of one run.
+
+        Returns:
+            The file path.
+        """
+        return out / "code-coverage" / f"{name}.exec"
+
+    @classmethod
+    def dumps(cls, out: Path, runs: list[BenchRun]) -> dict[tuple[str, int], Path]:
+        """Find the JaCoCo dumps of the counted runs.
+
+        Returns:
+            The dump of each version and round.
+
+        Raises:
+            FileNotFoundError: If a run has none.
+        """
+        found = {}
+        for run in runs:
+            path = cls.dump_path(out, cls.run_name(run.version, run.round))
+            if not path.exists():
+                raise FileNotFoundError(f"Round {run.round} of {run.version} has no code coverage dump at {path}")
+            found[run.version, run.round] = path
+        return found
+
+    @staticmethod
+    def run_name(version: str, number: int) -> str:
         """Name a run the same way for its saved record, its logs and its TestNG folder. Warmups count down from -1.
 
         Returns:
@@ -250,7 +292,16 @@ class Benchmark:
         """
         if number < 0:
             return f"warmup-{-number}"
-        return f"round-{number}-{version.name.lower().replace(' + ', '-').replace(' ', '-')}"
+        return f"round-{number}-{version.lower().replace(' + ', '-').replace(' ', '-')}"
+
+    @classmethod
+    def _name(cls, version: SuiteVersion, number: int) -> str:
+        """Name a run of a version.
+
+        Returns:
+            The name `run_name` gives.
+        """
+        return cls.run_name(version.name, number)
 
 
 class BenchReport:
@@ -260,8 +311,10 @@ class BenchReport:
     rounds hits both sides.
     """
 
-    def __init__(self, plan: VersionPlan, runs: list[BenchRun], repeated: int = 0) -> None:
-        """Keep the plan, the counted runs and how many runs had to be repeated.
+    def __init__(
+        self, plan: VersionPlan, runs: list[BenchRun], repeated: int = 0, code: BenchCode | None = None
+    ) -> None:
+        """Keep the plan, the counted runs, how many runs had to be repeated, and the server code each run kept.
 
         Raises:
             ValueError: If a counted run never started, since kept coverage would compare against nothing.
@@ -272,6 +325,7 @@ class BenchReport:
         self._plan = plan
         self._runs = runs
         self._repeated = repeated
+        self._code = code
 
     def markdown(self) -> str:
         """Write the report.
@@ -288,14 +342,50 @@ class BenchReport:
             "Original run of the same round that this run also reached, as a median over the rounds. "
             f"{self._repeated} runs were repeated because their suite never started.",
             "",
-            "| Version | Tests | Requests | Runtime median (min to max) | Runtime vs Original | Passed | "
-            "RESTCov items kept | Value items kept |",
-            "|---|---:|---:|---:|---:|---:|---:|---:|",
         ]
+        columns = ["Version", "Tests", "Requests", "Runtime median (min to max)", "Runtime vs Original", "Passed"]
+        columns += ["RESTCov items kept", "Value items kept"]
+        if self._code is not None:
+            lines[-2] += (
+                " Lines, branches and methods kept count the server code the JaCoCo agent saw, without the code the "
+                "server runs on its own, in the same way."
+            )
+            columns += [f"{kind.capitalize()} kept" for kind in CodeKept.KINDS]
+        lines += ["| " + " | ".join(columns) + " |", "|---|" + "---:|" * (len(columns) - 1)]
         for version in self._plan.versions:
             lines.append(self._row(version, rounds))
         lines += ["", *self._significance(rounds)]
+        if self._code is not None:
+            lines += ["", self._against_recording(self._code)]
         return "\n".join(lines) + "\n"
+
+    def _code_cells(self, code: BenchCode, version: SuiteVersion, rounds: list[int]) -> list[str]:
+        """Write the median share of the Original run's code that this version kept over the rounds.
+
+        Returns:
+            One cell per kind.
+        """
+        kept = [code.runs[version.name, number] for number in rounds if (version.name, number) in code.runs]
+        if not kept:
+            return ["" for _ in CodeKept.KINDS]
+        return [
+            f"{statistics.median(run.share(kind) for run in kept):.1%} of {getattr(kept[0].reference, kind)}"
+            for kind in CodeKept.KINDS
+        ]
+
+    @staticmethod
+    def _against_recording(code: BenchCode) -> str:
+        """Say how much of the code the recording reached the Original runs reached, as a whole suite.
+
+        Returns:
+            One line.
+        """
+        kept = list(code.recording.values())
+        shares = ", ".join(
+            f"{statistics.median(run.share(kind) for run in kept):.1%} of the {getattr(kept[0].reference, kind)} {kind}"
+            for kind in CodeKept.KINDS
+        )
+        return f"Against the recording, where every test ran alone, the Original runs reached a median of {shares}."
 
     def _row(self, version: SuiteVersion, rounds: list[int]) -> str:
         runs = self._of(version.name)
@@ -316,10 +406,14 @@ class BenchReport:
         original_items = self._at(VersionPlan.ORIGINAL, rounds[0])
         total = len(original_items.coverage.items) if original_items else 0
         total_values = len(original_items.values) if original_items else 0
-        return (
-            f"| {version.name} | {len(version.tests)} | {requests:g} | {runtime} | {versus} | {passed:g} | "
-            f"{statistics.median(kept):.1%} of {total} | {statistics.median(kept_values):.1%} of {total_values} |"
-        )
+        cells = [version.name, str(len(version.tests)), f"{requests:g}", runtime, versus, f"{passed:g}"]
+        cells += [
+            f"{statistics.median(kept):.1%} of {total}",
+            f"{statistics.median(kept_values):.1%} of {total_values}",
+        ]
+        if self._code is not None:
+            cells += self._code_cells(self._code, version, rounds)
+        return "| " + " | ".join(cells) + " |"
 
     def _significance(self, rounds: list[int]) -> list[str]:
         """Test with the paired Wilcoxon signed rank test whether a version is faster than another.
