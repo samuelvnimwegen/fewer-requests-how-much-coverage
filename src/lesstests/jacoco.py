@@ -554,8 +554,8 @@ class CodeCounter:
                 unmatched.add(parts[1])
         if unmatched:
             raise ValueError(
-                f"{len(unmatched)} class files differ from what the server ran, such as {min(unmatched)}. "
-                "Was the image rebuilt under the same tag?"
+                f"The class files differ from what the server ran for {len(unmatched)} of the classes, "
+                f"such as {min(unmatched)}. Was the image rebuilt under the same tag?"
             )
         return counts
 

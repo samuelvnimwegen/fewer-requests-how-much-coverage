@@ -295,7 +295,7 @@ def test_the_helper_agrees_with_jacocos_own_report(tmp_path: Path) -> None:
 def test_a_class_file_that_differs_from_what_the_server_ran_stops_the_count(tmp_path: Path) -> None:
     out = tmp_path / "out.tsv"
     out.write_text("group\tg0\t1\t2\t0\t0\t1\t1\nnomatch\torg/x/Pet\tg0\nmissing\torg/x/Gone\tg0\n")
-    with pytest.raises(ValueError, match="1 class files differ from what the server ran, such as org/x/Pet"):
+    with pytest.raises(ValueError, match="server ran for 1 of the classes, such as org/x/Pet"):
         CodeCounter._read(out)
 
 
@@ -407,7 +407,7 @@ def test_a_dump_of_another_build_stops_the_count_even_next_to_one_of_this_build(
     rebuilt = APP.replace("return 2;", "return 3;")
     classes, new = _compile_and_run(tmp_path, jacoco, rebuilt, "new", "neg")
     counter = CodeCounter(jacoco, [classes], "demo/", None)
-    with pytest.raises(ValueError, match="1 class files differ from what the server ran, such as demo/App"):
+    with pytest.raises(ValueError, match="server ran for 1 of the classes, such as demo/App"):
         counter.kept([KeptPair("both", (old, new), (new,))])
 
 
@@ -437,5 +437,5 @@ def test_an_idle_dump_of_another_build_stops_the_count(tmp_path: Path) -> None:
     rebuilt = APP.replace("return 2;", "return 3;")
     classes, dump = _compile_and_run(tmp_path, jacoco, rebuilt, "new", "pos")
     counter = CodeCounter(jacoco, [classes], "demo/", idle)
-    with pytest.raises(RuntimeError, match="The idle dump ran another build for 1 classes, such as demo/App"):
+    with pytest.raises(RuntimeError, match="The idle dump ran another build for 1 of its classes, such as demo/App"):
         counter.kept([KeptPair("pos", (dump,), (dump,))])

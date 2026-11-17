@@ -255,7 +255,7 @@ class CoverageCommand(RecordingCommand):
             checked = code.check()
             print(f"Server code without the idle mask, the same in JaCoCo's report: {checked.covered.to_dict()}")
             if checked.missing:
-                print(f"{len(checked.missing)} classes ran without a class file, such as {checked.missing[0]}")
+                print(f"{len(checked.missing)} of the classes ran without a class file, such as {checked.missing[0]}")
 
 
 class SelectCommand(RecordingCommand):

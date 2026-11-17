@@ -1,5 +1,3 @@
-package lesstests;
-
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.PrintWriter;
@@ -69,7 +67,7 @@ public final class LesstestsCoverage {
             .toList();
         if (!rebuilt.isEmpty()) {
             throw new IllegalStateException("The idle dump ran another build for " + rebuilt.size()
-                + " classes, such as " + rebuilt.get(0) + ". Record again so the idle dump and the class files"
+                + " of its classes, such as " + rebuilt.get(0) + ". Record again so the idle dump and the class files"
                 + " come from one image");
         }
         Counts totals = coverage.totals();
