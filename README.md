@@ -8,8 +8,21 @@ Newest first.
 
 | Version | Date | Status | PDF |
 |---|---|---|---|
-| 1.1 | 20 October 2026 | Waiting for review | [Scope v1.1](versions/v1.1/Scope_Samuel_van_Nimwegen_v1.1.pdf) |
+| 1.2 | 12 November 2026 | Waiting for review | [Scope v1.2](versions/v1.2/Scope_Samuel_van_Nimwegen_v1.2.pdf) |
+| 1.1 | 20 October 2026 | Reviewed, replaced by 1.2 | [Scope v1.1](versions/v1.1/Scope_Samuel_van_Nimwegen_v1.1.pdf) |
 | 1.0 | 29 September 2026 | Reviewed, replaced by 1.1 | [Scope v1.0](versions/v1.0/Scope_Samuel_van_Nimwegen_v1.0.pdf) |
+
+## What changed in 1.2
+
+I went through every comment in the second review.
+
+* The title and subtitle are the ones from the review.
+* Every research question asks one thing, and the text never makes a research question do something. There are five now, and boundary values got their own RQ4.
+* The data grew. The study uses all five APIs of Besjes et al., and EvoMaster generates a suite for the three APIs that run locally. That makes 13 suites.
+* Select can also build a regression suite and a smoke suite.
+* Greedy and FAST-R join Random as test suite reduction baselines.
+* Replay compares the answers a test gets with the answers it got when it ran alone. That's how the scope handles tests that depend on each other in a shared run.
+* Table 1 has proper column titles and corrected test counts, and the metrics follow the five new research questions.
 
 ## What changed in 1.1
 
