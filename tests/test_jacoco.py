@@ -419,3 +419,23 @@ def test_an_empty_dump_stops_the_count(tmp_path: Path) -> None:
     empty.write_bytes(b"")
     with pytest.raises(RuntimeError, match="is empty"):
         CodeCounter(jacoco, [classes], "demo/", None).kept([KeptPair("e", (empty,), (dump,))])
+
+
+def test_a_failed_docker_create_stops_with_its_message(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(command, 1, "", "Error: No such image: fineract:1")
+
+    monkeypatch.setattr(jacoco_module.subprocess, "run", run)
+    with pytest.raises(RuntimeError, match="docker create fineract:1 failed:\nError: No such image: fineract:1"):
+        ServerClasses(FINERACT_CODE, "fineract:1").copy(tmp_path / "classes")
+
+
+@pytest.mark.skipif(not os.environ.get("LESSTESTS_JACOCO"), reason="needs LESSTESTS_JACOCO and a JDK")
+def test_an_idle_dump_of_another_build_stops_the_count(tmp_path: Path) -> None:
+    jacoco = JaCoCo.at(Path(os.environ["LESSTESTS_JACOCO"]))
+    _, idle = _compile_and_run(tmp_path, jacoco, APP, "old", "tick")
+    rebuilt = APP.replace("return 2;", "return 3;")
+    classes, dump = _compile_and_run(tmp_path, jacoco, rebuilt, "new", "pos")
+    counter = CodeCounter(jacoco, [classes], "demo/", idle)
+    with pytest.raises(RuntimeError, match="The idle dump ran another build: nomatch\tdemo/App"):
+        counter.kept([KeptPair("pos", (dump,), (dump,))])

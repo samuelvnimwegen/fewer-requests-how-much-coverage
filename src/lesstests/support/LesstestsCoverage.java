@@ -45,6 +45,7 @@ public final class LesstestsCoverage {
 
     private final Map<String, byte[]> classes = new TreeMap<>();
     private final Map<Path, Map<Long, Probes>> files = new HashMap<>();
+    private final Map<String, Long> ids = new HashMap<>();
 
     private LesstestsCoverage() {
     }
@@ -59,6 +60,13 @@ public final class LesstestsCoverage {
             coverage.addClasses(location, job.prefix);
         }
         Map<Long, Probes> idle = job.idle == null ? Map.of() : coverage.load(job.idle);
+
+        // The mask matches classes by id, so an idle dump of another build would mask only the classes that stayed.
+        for (String problem : coverage.problems(idle)) {
+            if (problem.startsWith("nomatch")) {
+                throw new IllegalStateException("The idle dump ran another build: " + problem);
+            }
+        }
         Counts totals = coverage.totals();
         try (PrintWriter out = new PrintWriter(Files.newBufferedWriter(Path.of(args[2]), StandardCharsets.UTF_8))) {
             for (Group group : job.groups) {
@@ -184,7 +192,7 @@ public final class LesstestsCoverage {
         for (Map.Entry<Long, Probes> entry : joined.entrySet()) {
             String name = entry.getValue().name;
             byte[] bytes = classes.get(name);
-            if (bytes != null && CRC64.classId(bytes) != entry.getKey()) {
+            if (bytes != null && ids.computeIfAbsent(name, key -> CRC64.classId(bytes)) != entry.getKey().longValue()) {
                 unmatched.add(name);
             } else if (bytes == null && !name.contains("$$") && !name.contains("$HibernateProxy$")) {
                 missing.add(name);

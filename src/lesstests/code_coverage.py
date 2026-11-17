@@ -19,7 +19,7 @@ class RecordingCode:
     """
 
     def __init__(self, recordings: list[Recording], jacoco: JaCoCo, code: ServerCode) -> None:
-        """Keep the recordings, the first one being the original suite."""
+        """Keep the recordings, the first one being the original suite, which must have its class files."""
         self._recordings = recordings
         self._jacoco = jacoco
         self._code = code
@@ -50,7 +50,7 @@ class RecordingCode:
             The code coverage, or None when the recording has none.
 
         Raises:
-            ValueError: If the recording has code coverage but no JaCoCo was given.
+            ValueError: If the recording has code coverage but no JaCoCo was given, or no class files yet.
         """
         if not recording.has_code_coverage:
             return None
@@ -104,7 +104,7 @@ class RecordingCode:
         """
         base = self.files(reference)
         pairs = [KeptPair(name, self.files(tests), base, name in listed) for name, tests in versions.items()]
-        return {str(name): kept for name, kept in self._counter.kept(pairs).items()}
+        return self._counter.kept(pairs)
 
     def check(self) -> CodeCheck:
         """Check the helper against JaCoCo's own report on all dumps of the first recording.
@@ -131,12 +131,15 @@ class RecordingCode:
         for version in plan.versions:
             version.code = kept[version.name]
 
-    @property
     def recorded(self) -> tuple[Path, ...]:
-        """The dumps of every test of the original recording."""
+        """Find the dumps of every test of the original recording, which reads every record.
+
+        Returns:
+            The file paths.
+        """
         return self.files(record.test for record in self._recordings[0].records())
 
-    def pairs(self, pairs: list[KeptPair]) -> dict[Hashable, CodeKept]:
+    def pairs[K: Hashable](self, pairs: list[KeptPair[K]]) -> dict[K, CodeKept]:
         """Count any pairs of dumps with this recording's classes and idle dump, such as benchmark runs.
 
         Returns:
@@ -163,17 +166,12 @@ class BenchCode:
         Returns:
             The kept coverage of every run.
         """
-        recorded = code.recorded
-        pairs = [
-            KeptPair((version, number), (path,), (dumps[original, number],))
-            for (version, number), path in dumps.items()
-        ]
-        pairs += [
+        runs = code.pairs([KeptPair(key, (path,), (dumps[original, key[1]],)) for key, path in dumps.items()])
+        recorded = code.recorded()
+        originals = [
             KeptPair(number, (path,), recorded) for (version, number), path in dumps.items() if version == original
         ]
-        kept = code.pairs(pairs)
-        runs = {key: value for key, value in kept.items() if isinstance(key, tuple)}
-        return cls(runs, {key: value for key, value in kept.items() if isinstance(key, int)})
+        return cls(runs, code.pairs(originals))
 
     def to_dict(self) -> dict[str, Any]:
         """Turn it into JSON friendly data.

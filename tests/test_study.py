@@ -155,3 +155,27 @@ def test_the_study_counts_every_smaller_suite_in_one_go_and_lists_only_selected(
     # A later run without code coverage must not leave the old list behind.
     SelectionStudy(recording, coverage, restcov, [Budget(0.5)], draws=2, seed=1).run(tmp_path / "selection")
     assert not (tmp_path / "selection" / "code-lost.md").exists()
+
+
+def test_the_code_table_lists_the_largest_budget_first() -> None:
+    def version(budget: float, lines: int) -> dict[str, object]:
+        return {
+            "version": "selected",
+            "budget": budget,
+            "kept": 1,
+            "requests": 1,
+            "lost": _counts(),
+            "code": _code(lines),
+        }
+
+    result = {
+        "tests": 4,
+        "requests": 4,
+        "pool": 4,
+        "draws": 0,
+        "full": _counts(),
+        "versions": [version(0.25, 50), version(0.75, 90)],
+    }
+    lines = StudyReport(result).markdown().splitlines()
+    rows = [line for line in lines if line.startswith(("| 75% | 1 | Selected | 90.0%", "| 25% | 1 | Selected | 50.0%"))]
+    assert [row[:5] for row in rows] == ["| 75%", "| 25%"]

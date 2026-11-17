@@ -307,6 +307,8 @@ class CodeCounts:
     branches: int = 0
     methods: int = 0
 
+    KINDS: ClassVar[tuple[str, ...]] = ("lines", "branches", "methods")
+
     def to_dict(self) -> dict[str, int]:
         """Turn the counts into JSON friendly data.
 
@@ -316,7 +318,7 @@ class CodeCounts:
         return {"lines": self.lines, "branches": self.branches, "methods": self.methods}
 
     def of(self, kind: str) -> int:
-        """Read one kind, `lines`, `branches` or `methods`.
+        """Read one of the `KINDS`.
 
         Returns:
             The count.
@@ -362,7 +364,7 @@ class CodeKept:
     lost_methods: tuple[str, ...] = ()
     lost_classes: tuple[str, ...] = ()
 
-    KINDS: ClassVar[tuple[str, ...]] = ("lines", "branches", "methods")
+    KINDS: ClassVar[tuple[str, ...]] = CodeCounts.KINDS
 
     def share(self, kind: str) -> float:
         """The part of the reference's lines, branches or methods this version kept.
@@ -415,10 +417,10 @@ class MethodName:
 
 
 @dataclass(frozen=True, slots=True)
-class KeptPair:
+class KeptPair[K: Hashable]:
     """A version's dump files and those of the reference it gets compared with. `name` is the key of the result."""
 
-    name: Hashable
+    name: K
     files: tuple[Path, ...]
     reference: tuple[Path, ...]
     methods: bool = False
@@ -477,11 +479,11 @@ class CodeCounter:
         self._prefix = prefix
         self._idle = idle
 
-    def kept(self, pairs: Iterable[KeptPair]) -> dict[Hashable, CodeKept]:
-        """Count what every version kept of its reference, in one helper run.
+    def kept[K: Hashable](self, pairs: Iterable[KeptPair[K]]) -> dict[K, CodeKept]:
+        """Count what every pair's version kept of its reference, in one helper run.
 
         Returns:
-            The kept coverage by version name.
+            The kept coverage by pair name.
         """
         pairs = list(pairs)
         groups: dict[frozenset[Path], bool] = {}
