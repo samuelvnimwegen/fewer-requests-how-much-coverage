@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, ClassVar, Protocol, Self
 
 from lesstests.exchange import Exchange
+from lesstests.jacoco import NoServerCoverage, ServerCoverage
 from lesstests.java import JavaTest, JvmRunner, Outcome, SuiteFinder
 from lesstests.proxy import Proxy
 from lesstests.service import Service
@@ -83,10 +84,14 @@ class Recording:
     """A folder that holds one recorded suite.
 
     `tests/` has one JSON file per test. `restcov-logs/` has the same exchanges as RESTCov log files, one folder per
-    test, so any group of tests can be measured by copying its folders together.
+    test, so any group of tests can be measured by copying its folders together. A recording with code coverage also
+    has `code-coverage/`: one JaCoCo dump per test, the idle dump, and the server's class files.
     """
 
     RUN_FACTS = frozenset({"tests", "started", "finished"})
+
+    # Facts that are false when they're missing, so a resume compares them both ways.
+    SWITCHES = frozenset({"code_coverage"})
 
     def __init__(self, folder: Path) -> None:
         """Point at the folder, which may not exist yet."""
@@ -106,6 +111,34 @@ class Recording:
     def logs_folder(self) -> Path:
         """Where the RESTCov log folders live."""
         return self.folder / "restcov-logs"
+
+    @property
+    def code_folder(self) -> Path:
+        """Where the code coverage of the server lives."""
+        return self.folder / "code-coverage"
+
+    @property
+    def has_code_coverage(self) -> bool:
+        """Whether the server ran with the JaCoCo agent."""
+        return self.has_meta and bool(self.meta().get("code_coverage"))
+
+    def exec_of(self, test: JavaTest) -> Path:
+        """Find the JaCoCo dump of one test.
+
+        Returns:
+            The file path.
+        """
+        return self.code_folder / "exec" / f"{test.id}.exec"
+
+    @property
+    def idle_file(self) -> Path:
+        """The dump of the server running alone, whose probes the counts leave out."""
+        return self.code_folder / "idle.exec"
+
+    @property
+    def classes_folder(self) -> Path:
+        """The server's class files, copied out of its image."""
+        return self.code_folder / "classes"
 
     @property
     def last_change(self) -> float:
@@ -177,9 +210,9 @@ class Recording:
         """
         if self.has_meta:
             stored = self.meta()
-            changed = sorted(
-                key for key, value in meta.items() if key not in self.RUN_FACTS and stored.get(key) != value
-            )
+            facts = {key for key in meta if key not in self.RUN_FACTS | self.SWITCHES and stored.get(key) != meta[key]}
+            switches = {key for key in self.SWITCHES if bool(stored.get(key)) != bool(meta.get(key))}
+            changed = sorted(facts | switches)
             if changed:
                 raise ValueError(f"{self.folder} was recorded with another {', '.join(changed)}. Pick a new --out")
         gone = sorted({path.stem for path in self.tests_folder.glob("*.json")} - {test.id for test in tests})
@@ -304,14 +337,16 @@ class Recorder:
         proxy: Proxy,
         recording: Recording,
         reset: ResetPolicy | None = None,
+        code: ServerCoverage | None = None,
     ) -> None:
-        """Wire the parts together. The default policy resets before every test."""
+        """Wire the parts together. The default policy resets before every test, and the server runs without JaCoCo."""
         self._suite = suite
         self._runner = runner
         self._service = service
         self._proxy = proxy
         self._recording = recording
         self._reset = reset or EveryTest()
+        self._code = code or NoServerCoverage()
 
     def run(
         self,
@@ -325,7 +360,7 @@ class Recorder:
         """
         # The suite's order stays, since JUnit's order keeps @Order and the tests of a class together.
         tests = list(self._suite.tests() if tests is None else tests)
-        meta = {**meta, **self._reset.facts()}
+        meta = {**meta, **self._reset.facts(), **self._code.facts()}
         self._recording.check_resume(meta, tests)
         started = datetime.now(UTC).isoformat(timespec="seconds")
         if self._recording.has_meta:
@@ -334,6 +369,7 @@ class Recorder:
         with self._proxy:
             try:
                 self._service.start()
+                self._code_after_start()
                 recorded = {test for test in tests if self._recording.has(test)}
                 pending = (set(tests) - recorded) | self._reset.redo(recorded, tests)
                 previous: JavaTest | None = None
@@ -350,12 +386,24 @@ class Recorder:
         finished = datetime.now(UTC).isoformat(timespec="seconds")
         self._recording.write_meta({**meta, "tests": len(tests), "started": started, "finished": finished})
 
+    def _code_after_start(self) -> None:
+        """Dump what the server covers on its own, unless an earlier run got that far.
+
+        Its startup never reaches a test, since every policy resets before the first test of a run.
+        """
+        if not self._recording.idle_file.exists():
+            self._code.idle(self._recording.idle_file)
+
     def _record_one(self, test: JavaTest, reset: bool) -> RecordedTest:
         if reset:
             self._service.reset()
+            self._code.clear()
 
         # A late answer from the previous test must not end up in this one.
         self._proxy.log.take()
         result = self._runner.run(test)
         exchanges, errors = self._proxy.log.take()
+
+        # The dump comes before the record is saved, so a saved record always has its dump.
+        self._code.dump(self._recording.exec_of(test))
         return RecordedTest(test, result.outcome, result.seconds, exchanges, errors)

@@ -1,4 +1,5 @@
 import argparse
+import json
 import os
 import re
 import sys
@@ -7,12 +8,15 @@ from typing import Any, Protocol
 
 from lesstests.api import ApiDescription
 from lesstests.bench import Benchmark, BenchReport, BenchRun
+from lesstests.code_coverage import BenchCode, RecordingCode
 from lesstests.coverage import RestCov, SuiteCoverage
+from lesstests.jacoco import JaCoCo
 from lesstests.merge_study import MergeFolder, MergeStudy, PlanStudy
 from lesstests.recording import RecordedTest, Recorder, Recording
 from lesstests.selection import Budget
 from lesstests.study import SelectionStudy
 from lesstests.subjects import SUBJECTS, Runners, SuiteCatalog
+from lesstests.versions import VersionPlan
 
 
 class Command(Protocol):
@@ -85,6 +89,52 @@ class RestCovOption:
         return RestCov(Path(args.restcov).resolve(), Path(meta["spec"]), base_path=meta.get("restcov_base_path"))
 
 
+class JaCoCoOption:
+    """The `--jacoco` argument: the lib folder of a JaCoCo release, for server code coverage."""
+
+    @staticmethod
+    def add_argument(parser: argparse.ArgumentParser) -> None:
+        """Declare `--jacoco`, which falls back to `LESSTESTS_JACOCO`."""
+        parser.add_argument(
+            "--jacoco",
+            type=Path,
+            default=os.environ.get("LESSTESTS_JACOCO"),
+            help="the folder with jacocoagent.jar and jacococli.jar, or set LESSTESTS_JACOCO",
+        )
+
+    @staticmethod
+    def jacoco(args: argparse.Namespace) -> JaCoCo:
+        """Find JaCoCo.
+
+        Returns:
+            JaCoCo, ready to use.
+
+        Raises:
+            SystemExit: If no folder was given or a jar is missing.
+        """
+        if args.jacoco is None:
+            raise SystemExit("Give --jacoco or set LESSTESTS_JACOCO to the lib folder of a JaCoCo release")
+        try:
+            return JaCoCo.at(Path(args.jacoco))
+        except ValueError as error:
+            raise SystemExit(str(error)) from error
+
+    @classmethod
+    def recording_code(cls, args: argparse.Namespace, recording: Recording) -> RecordingCode | None:
+        """Build the code coverage of a recording made with `--code-coverage`, and check it against JaCoCo once.
+
+        Returns:
+            The code coverage, or None when the recording has none.
+        """
+        if not recording.has_code_coverage:
+            return None
+        subject = SUBJECTS[recording.meta()["subject"]]
+        code = RecordingCode.of(recording, cls.jacoco(args), subject.server_code)
+        if code is not None:
+            code.check()
+        return code
+
+
 class Progress:
     """Console lines for the long running steps."""
 
@@ -116,21 +166,33 @@ class RecordCommand:
         parser.add_argument("--suite", required=True, help="suite name, like single-agent or multi-agent")
         parser.add_argument("--out", type=Path, required=True, help="the recording folder")
         parser.add_argument("--only", help="record only the tests whose id matches this regular expression")
+        parser.add_argument(
+            "--code-coverage", action="store_true", help="run the server with the JaCoCo agent and keep a dump per test"
+        )
+        JaCoCoOption.add_argument(parser)
         EnvFile.add_argument(parser)
 
     def run(self, args: argparse.Namespace) -> None:
-        """Prepare the project, start the service and record."""
+        """Prepare the project, start the service and record.
+
+        Raises:
+            SystemExit: If code coverage was asked for a subject without a server the tool runs.
+        """
         subject = SUBJECTS[args.subject]
+        jacoco = JaCoCoOption.jacoco(args) if args.code_coverage else None
+        if jacoco is not None and subject.server_code is None:
+            raise SystemExit(f"{subject.name} has no server the tool runs, so it has no code coverage")
         project = args.project.resolve()
         recording = Recording(args.out.resolve())
         built = subject.toolchain.project(project, recording.project_folder, subject.overlays(project, args.suite))
         print(f"Compiling a copy of {project} ...", flush=True)
         built.prepare()
-        connection = subject.connect(EnvFile.read(args.env_file))
+        connection = subject.connect(EnvFile.read(args.env_file), jacoco)
         package = SuiteCatalog.source(subject, args.suite).package
         suite = subject.toolchain.suite(built, package, connection.settings)
         runner = Runners.of(subject, built, recording.folder / "testng", connection.settings)
-        recorder = Recorder(suite, runner, connection.service, connection.proxy, recording, subject.reset_policy)
+        reset = subject.reset_policy
+        recorder = Recorder(suite, runner, connection.service, connection.proxy, recording, reset, connection.code)
         meta = {
             "subject": subject.name,
             "suite": args.suite,
@@ -147,6 +209,9 @@ class RecordCommand:
             meta["only"] = args.only
         recorder.run(meta, Progress.recorded, tests)
 
+        # Only counting needs the class files, so they come out of the image once the tests ran.
+        connection.code.classes(recording.classes_folder)
+
 
 class RecordingCommand:
     """A command that works on a finished recording and needs RESTCov."""
@@ -155,6 +220,7 @@ class RecordingCommand:
         """Declare the recording and RESTCov."""
         parser.add_argument("--recording", type=Path, required=True, help="a folder made by `lesstests record`")
         RestCovOption.add_argument(parser)
+        JaCoCoOption.add_argument(parser)
 
     @staticmethod
     def coverage(recording: Recording, restcov: RestCov) -> SuiteCoverage:
@@ -184,6 +250,12 @@ class CoverageCommand(RecordingCommand):
         coverage = SuiteCoverage.measure(recording, restcov, recording.folder / "coverage")
         coverage.save(recording.folder / "coverage" / "coverage.json")
         print(f"Full suite: {len(coverage.full)} items, {coverage.full.counts()}")
+        code = JaCoCoOption.recording_code(args, recording)
+        if code is not None:
+            checked = code.check()
+            print(f"Server code without the idle mask, the same in JaCoCo's report: {checked.covered.to_dict()}")
+            if checked.missing:
+                print(f"{len(checked.missing)} of the classes ran without a class file, such as {checked.missing[0]}")
 
 
 class SelectCommand(RecordingCommand):
@@ -207,7 +279,8 @@ class SelectCommand(RecordingCommand):
         coverage = self.coverage(recording, restcov)
         budgets = [Budget(percent / 100) for percent in args.budgets]
         out = recording.folder / "selection"
-        study = SelectionStudy(recording, coverage, restcov, budgets, args.draws, args.seed, args.passing_only)
+        code = JaCoCoOption.recording_code(args, recording)
+        study = SelectionStudy(recording, coverage, restcov, budgets, args.draws, args.seed, args.passing_only, code)
         study.run(out)
         print((out / "report.md").read_text(encoding="utf-8"))
 
@@ -230,7 +303,8 @@ class MergeCommand(RecordingCommand):
         recording = Recording(args.recording.resolve())
         restcov = RestCovOption.restcov(args, recording.meta())
         coverage = self.coverage(recording, restcov)
-        study = MergeStudy(recording, restcov, coverage, EnvFile.read(args.env_file), args.rounds, Progress.recorded)
+        env, code = EnvFile.read(args.env_file), JaCoCoOption.recording_code(args, recording)
+        study = MergeStudy(recording, restcov, coverage, env, args.rounds, Progress.recorded, code)
         print(study.run(args.out.resolve()).markdown())
 
 
@@ -249,7 +323,8 @@ class PlanCommand(RecordingCommand):
         """Pick Select's tests and write the folder the benchmark reads."""
         recording = Recording(args.recording.resolve())
         coverage = self.coverage(recording, RestCovOption.restcov(args, recording.meta()))
-        print(PlanStudy(recording, coverage).run(args.out.resolve()))
+        code = JaCoCoOption.recording_code(args, recording)
+        print(PlanStudy(recording, coverage, code).run(args.out.resolve()))
 
 
 class BenchCommand:
@@ -266,7 +341,13 @@ class BenchCommand:
         parser.add_argument("--rounds", type=self.at_least_one, default=10)
         parser.add_argument("--warmup", type=int, default=1, help="Original runs before the counted rounds")
         parser.add_argument("--out", type=Path, help="the benchmark folder, by default `bench` in the merge folder")
+        parser.add_argument(
+            "--no-code-coverage",
+            action="store_true",
+            help="run without the JaCoCo agent even when the recording has code coverage, such as to time its cost",
+        )
         RestCovOption.add_argument(parser)
+        JaCoCoOption.add_argument(parser)
         EnvFile.add_argument(parser)
 
     @staticmethod
@@ -292,15 +373,25 @@ class BenchCommand:
         restcov = RestCovOption.restcov(args, meta)
         api = ApiDescription.load(Path(meta["spec"]), meta.get("restcov_base_path"))
         subject = SUBJECTS[meta["subject"]]
-        connection = subject.connect(EnvFile.read(args.env_file))
+        code = None
+        if meta.get("code_coverage") and not args.no_code_coverage:
+            code = JaCoCoOption.recording_code(args, Recording(Path(meta["recording"])))
+        connection = subject.connect(EnvFile.read(args.env_file), code.jacoco if code else None)
 
         # Merge or Record already compiled this copy, and every version runs from it.
         project = subject.toolchain.project(Path(meta["project"]), folder.project, ())
         runner = Runners.of(subject, project, out, connection.settings)
         plan = folder.plan()
-        benchmark = Benchmark(plan, runner, connection.proxy, connection.proxy.log, connection.service, (restcov, api))
+        service = connection.service
+        benchmark = Benchmark(
+            plan, runner, connection.proxy, connection.proxy.log, service, (restcov, api), connection.code
+        )
         runs = benchmark.run(out, args.rounds, args.warmup, Progress.benched)
-        report = BenchReport(plan, runs, Benchmark.repeated(out)).markdown()
+        kept = None
+        if code is not None:
+            kept = BenchCode.count(code, Benchmark.dumps(out, runs), VersionPlan.ORIGINAL)
+            (out / "code-coverage.json").write_text(json.dumps(kept.to_dict(), indent=1), encoding="utf-8")
+        report = BenchReport(plan, runs, Benchmark.repeated(out), kept).markdown()
         (out / "report.md").write_text(report, encoding="utf-8")
         print(report)
 

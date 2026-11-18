@@ -270,3 +270,95 @@ def test_the_recorder_keeps_the_suites_order(tmp_path: Path, upstream: Address) 
 
     # JUnit runs `second` before `first` here, for example through @Order, and the recording follows it.
     assert service.calls == ["start", "reset", "run second", "run first", "reset", "run a1", "stop"]
+
+
+class FakeCode:
+    """Logs the code coverage calls next to the service's, and writes each dump as a file."""
+
+    def __init__(self, calls: list[str], recording: Recording | None = None) -> None:
+        self.calls = calls
+        self.recording = recording
+
+    @property
+    def on(self) -> bool:
+        return True
+
+    def clear(self) -> None:
+        self.calls.append("clear")
+
+    def dump(self, path: Path) -> None:
+        self.calls.append(f"dump {path.name}")
+
+        # A record saved before its dump would look finished to a resume that never got the dump.
+        if self.recording is not None:
+            assert not (self.recording.tests_folder / f"{path.stem}.json").exists()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("dump")
+
+    def idle(self, path: Path) -> None:
+        self.calls.append("idle")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("idle")
+
+    def classes(self, target: Path) -> None:
+        self.calls.append("classes")
+
+    def facts(self) -> dict[str, bool]:
+        return {"code_coverage": True}
+
+
+def test_the_code_counters_start_from_zero_after_every_reset_and_dump_after_every_test(
+    tmp_path: Path, upstream: Address
+) -> None:
+    recording = Recording(tmp_path / "rec")
+    proxy = RecordingProxy(Address("127.0.0.1", 0), upstream)
+    service = FakeService(upstream, proxy)
+    runner = FakeRunner(tmp_path, proxy, service.calls)
+    code = FakeCode(service.calls, recording)
+    Recorder(_suite(tmp_path), runner, service, proxy, recording, EveryClass(), code).run({})
+
+    # One class, so one reset. The dump of a test comes before the next test runs.
+    assert service.calls == [
+        "start",
+        "idle",
+        "reset",
+        "clear",
+        "run a",
+        "dump suite.Api.a.exec",
+        "run b",
+        "dump suite.Api.b.exec",
+        "run c",
+        "dump suite.Api.c.exec",
+        "stop",
+    ]
+    assert recording.exec_of(JavaTest("suite.Api", "b")).read_text() == "dump"
+    assert recording.meta()["code_coverage"] is True
+
+
+def test_a_resumed_recording_keeps_its_first_idle_dump(tmp_path: Path, upstream: Address) -> None:
+    recording = Recording(tmp_path / "rec")
+    recording.idle_file.parent.mkdir(parents=True)
+    recording.idle_file.write_text("first")
+    proxy = RecordingProxy(Address("127.0.0.1", 0), upstream)
+    service = FakeService(upstream, proxy)
+    runner = FakeRunner(tmp_path, proxy, service.calls)
+    Recorder(_suite(tmp_path), runner, service, proxy, recording, code=FakeCode(service.calls)).run({})
+    assert "idle" not in service.calls
+    assert recording.idle_file.read_text() == "first"
+
+
+@pytest.mark.parametrize(("stored", "new"), [({}, {"code_coverage": True}), ({"code_coverage": True}, {})])
+def test_a_recording_with_code_coverage_and_one_without_never_mix(
+    tmp_path: Path, stored: dict[str, bool], new: dict[str, bool]
+) -> None:
+    recording = Recording(tmp_path / "rec")
+    recording.write_meta({"suite": "x", **stored})
+    with pytest.raises(ValueError, match="code_coverage"):
+        recording.check_resume({"suite": "x", **new}, [])
+
+
+def test_a_recording_from_before_code_coverage_still_resumes_without_it(tmp_path: Path) -> None:
+    recording = Recording(tmp_path / "rec")
+    recording.write_meta({"suite": "x"})
+    recording.check_resume({"suite": "x"}, [])
+    assert not recording.has_code_coverage

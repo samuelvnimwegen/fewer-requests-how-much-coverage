@@ -7,6 +7,7 @@ from typing import Any, Self
 
 from lesstests.api import ApiDescription, ValueItem
 from lesstests.coverage import CoverageSet, SuiteCoverage
+from lesstests.jacoco import CodeKept
 from lesstests.java import JavaTest
 from lesstests.recording import RecordedTest
 from lesstests.selection import SmallestCover
@@ -14,13 +15,17 @@ from lesstests.selection import SmallestCover
 
 @dataclass(slots=True)
 class SuiteVersion:
-    """One version of the suite with the coverage, values and requests its recorded tests predict."""
+    """One version of the suite with the coverage, values and requests its recorded tests predict.
+
+    `code` is the server code it keeps of the Original, for a recording with code coverage.
+    """
 
     name: str
     tests: list[JavaTest]
     coverage: CoverageSet
     values: frozenset[ValueItem]
     requests: int
+    code: CodeKept | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Turn the version into JSON friendly data.
@@ -34,6 +39,7 @@ class SuiteVersion:
             "coverage": self.coverage.to_list(),
             "values": [value.to_list() for value in sorted(self.values)],
             "requests": self.requests,
+            **({"code": self.code.to_dict()} if self.code else {}),
         }
 
     @classmethod
@@ -49,6 +55,7 @@ class SuiteVersion:
             CoverageSet.from_list(raw["coverage"]),
             frozenset(ValueItem.from_list(value) for value in raw["values"]),
             raw["requests"],
+            CodeKept.from_dict(raw["code"]) if "code" in raw else None,
         )
 
 
@@ -91,22 +98,37 @@ class VersionPlan:
             The report as Markdown.
         """
         full, values = self.original.coverage, self.original.values
+        code = [kind.capitalize() + " kept" for kind in CodeKept.KINDS] if self.original.code else []
         lines = [
             "# Predicted from the recordings",
             "",
             "Each test ran alone. The benchmark measures every version again as a whole suite.",
             "",
-            "| Version | Tests | Requests | RESTCov items kept | Value items kept |",
-            "|---|---:|---:|---:|---:|",
+            "| " + " | ".join(["Version", "Tests", "Requests", "RESTCov items kept", "Value items kept", *code]) + " |",
+            "|---|" + "---:|" * (4 + len(code)),
         ]
         for version in self.versions:
             kept = len(version.coverage.items & full.items)
             kept_values = len(version.values & values)
-            lines.append(
-                f"| {version.name} | {len(version.tests)} | {version.requests} | {kept} of {len(full)} | "
-                f"{kept_values} of {len(values)} |"
-            )
+            cells = [version.name, str(len(version.tests)), str(version.requests), f"{kept} of {len(full)}"]
+            cells.append(f"{kept_values} of {len(values)}")
+            if version.code is not None:
+                cells += [CodeShare.cell(version.code, kind) for kind in CodeKept.KINDS]
+            lines.append("| " + " | ".join(cells) + " |")
         return "\n".join(lines) + "\n"
+
+
+class CodeShare:
+    """Writes kept server code as a table cell."""
+
+    @staticmethod
+    def cell(kept: CodeKept, kind: str) -> str:
+        """Write how many lines, branches or methods a version kept, like `120 of 150 (80.0%)`.
+
+        Returns:
+            The cell text.
+        """
+        return f"{kept.kept.of(kind)} of {kept.reference.of(kind)} ({kept.share(kind):.1%})"
 
 
 class VersionPlanner:

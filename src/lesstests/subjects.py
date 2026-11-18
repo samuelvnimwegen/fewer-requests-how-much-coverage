@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
+from lesstests.jacoco import JaCoCo, NoServerCoverage, ServerCode, ServerCoverage
 from lesstests.java import (
     BuiltProject,
     GradleProject,
@@ -158,11 +159,12 @@ class Timeouts:
 
 @dataclass(slots=True)
 class Connection:
-    """Everything a run needs to reach the API: the service, the proxy in front of it and the JVM settings."""
+    """Everything a run needs to reach the API: the service, its proxy, the JVM settings and the code counters."""
 
     service: Service
     proxy: Proxy
     settings: JvmSettings
+    code: ServerCoverage = field(default_factory=NoServerCoverage)
 
 
 class Subject(Protocol):
@@ -203,6 +205,11 @@ class Subject(Protocol):
         """How long tests, suites and answers may take."""
         ...
 
+    @property
+    def server_code(self) -> ServerCode | None:
+        """What JaCoCo measures of the server, or None when the tool can't run the server, like a live API."""
+        ...
+
     def spec_path(self, source: Path, copy: Path) -> Path:
         """Find the API description, in the source project or, when the build makes it, in the built copy.
 
@@ -219,8 +226,10 @@ class Subject(Protocol):
         """
         ...
 
-    def connect(self, env: dict[str, str]) -> Connection:
+    def connect(self, env: dict[str, str], jacoco: JaCoCo | None = None) -> Connection:
         """Set up the service, the proxy and the JVM settings without starting anything.
+
+        With `jacoco`, the server runs with the JaCoCo agent.
 
         Returns:
             The connection.
@@ -269,6 +278,29 @@ class SuiteCatalog:
         return subject.suites[suite]
 
 
+class ServerAgent:
+    """Puts the JaCoCo agent into a subject's server container when a run asks for code coverage."""
+
+    @staticmethod
+    def attach(
+        subject: Subject, container: ContainerSpec, jacoco: JaCoCo | None
+    ) -> tuple[ContainerSpec, ServerCoverage]:
+        """Add the agent to the container, or leave it as it is without `jacoco`.
+
+        Returns:
+            The container to run, and the counters of its server.
+
+        Raises:
+            ValueError: If the subject has no server code the tool can measure.
+        """
+        if jacoco is None:
+            return container, NoServerCoverage()
+        code = subject.server_code
+        if code is None:
+            raise ValueError(f"{subject.name} has no server the tool runs, so it has no code coverage")
+        return code.container(container, jacoco), code.agent(jacoco, container.image)
+
+
 @dataclass(frozen=True, slots=True)
 class LocalSubject:
     """An API that runs in a local container. A reverse proxy takes the port the tests call."""
@@ -283,6 +315,7 @@ class LocalSubject:
     toolchain: Toolchain = field(default_factory=MavenTestNg)
     reset_policy: ResetPolicy = field(default_factory=EveryTest)
     timeouts: Timeouts = field(default_factory=Timeouts)
+    server_code: ServerCode | None = None
 
     def spec_path(self, source: Path, copy: Path) -> Path:
         """The description sits in the source project.
@@ -300,15 +333,16 @@ class LocalSubject:
         """
         return SuiteCatalog.source(self, suite).overlays(project)
 
-    def connect(self, env: dict[str, str]) -> Connection:
+    def connect(self, env: dict[str, str], jacoco: JaCoCo | None = None) -> Connection:
         """Use a fresh container and the reverse proxy.
 
         Returns:
             The connection.
         """
-        service = DockerService(self.container, self.service_port, f"lesstests-{self.name}")
+        container, code = ServerAgent.attach(self, self.container, jacoco)
+        service = DockerService(container, self.service_port, f"lesstests-{self.name}")
         proxy = RecordingProxy(self.listen, service.address, self.timeouts.request)
-        return Connection(service, proxy, JvmSettings(env=dict(env)))
+        return Connection(service, proxy, JvmSettings(env=dict(env)), code)
 
     def meta(self) -> dict[str, Any]:
         """The image the container runs.
@@ -341,6 +375,11 @@ class LiveSubject:
 
     TRUSTSTORE_PASSWORD = "lesstests"
 
+    @property
+    def server_code(self) -> ServerCode | None:
+        """None, since the server isn't ours to measure."""
+        return None
+
     def spec_path(self, source: Path, copy: Path) -> Path:
         """The description sits in the source project.
 
@@ -357,15 +396,19 @@ class LiveSubject:
         """
         return (*SuiteCatalog.source(self, suite).overlays(project), MavenProject.support_overlay())
 
-    def connect(self, env: dict[str, str]) -> Connection:
+    def connect(self, env: dict[str, str], jacoco: JaCoCo | None = None) -> Connection:
         """Use the intercepting proxy and hand the JVM the proxy address, the truststore and the credentials.
 
         Returns:
             The connection.
 
         Raises:
-            ValueError: If a credential the tests read is missing from `env`.
+            ValueError: If a credential the tests read is missing from `env`, or code coverage was asked for.
         """
+        if jacoco is not None:
+            raise ValueError(
+                f"{self.name} is a live API whose server isn't ours to measure, so it has no code coverage"
+            )
         missing = [name for name in self.required_env if not env.get(name)]
         if missing:
             raise ValueError(f"{self.name} needs {', '.join(missing)}. Pass them with --env-file")
@@ -422,6 +465,7 @@ class ServerSubject:
     reset_policy: ResetPolicy = field(default_factory=EveryTest)
     timeouts: Timeouts = field(default_factory=Timeouts)
     restcov_base_path: str | None = None
+    server_code: ServerCode | None = None
 
     def spec_path(self, source: Path, copy: Path) -> Path:
         """The description sits in the built copy.
@@ -439,16 +483,17 @@ class ServerSubject:
         """
         return SuiteCatalog.source(self, suite).overlays(project)
 
-    def connect(self, env: dict[str, str]) -> Connection:
+    def connect(self, env: dict[str, str], jacoco: JaCoCo | None = None) -> Connection:
         """Use both containers and the reverse proxy, and point the tests at the proxy.
 
         Returns:
             The connection.
         """
-        service = DatabaseService(self.app, self.database, self.service_port, f"lesstests-{self.name}")
+        app, code = ServerAgent.attach(self, self.app, jacoco)
+        service = DatabaseService(app, self.database, self.service_port, f"lesstests-{self.name}")
         proxy = RecordingProxy(self.listen, service.address, self.timeouts.request)
         settings = JvmSettings(env=dict(env), public_env={**self.address.env(self.listen), **self.test_env})
-        return Connection(service, proxy, settings)
+        return Connection(service, proxy, settings, code)
 
     def meta(self) -> dict[str, Any]:
         """Both images, since a rebuilt app image can keep its tag.
@@ -474,6 +519,8 @@ PETSTORE = LocalSubject(
         "single-agent": SuiteSource("generations.single_agent"),
         "multi-agent": SuiteSource("generations.multi_agent_chain"),
     },
+    # The swagger libraries in WEB-INF/lib share `io.swagger`, so only the sample's own package counts.
+    server_code=ServerCode("io.swagger.sample", ("/petstore/webapp/WEB-INF/classes",), port=8083),
 )
 
 GOOGLE_DRIVE = LiveSubject(
@@ -562,6 +609,10 @@ FINERACT = ServerSubject(
     test_env={"FINERACT_TEST_EXTERNAL_HOST": "host.docker.internal"},
     reset_policy=EveryClass(),
     timeouts=Timeouts(test=1800.0, suite=12 * 3600.0, request=600.0),
+    # The most frequent jobs run every minute, 10 minutes and 15 minutes, so 16 minutes alone sees each of them.
+    server_code=ServerCode(
+        "org.apache.fineract", ("/app/classes", "/app/libs/fineract-*.jar"), port=8093, idle_seconds=16 * 60.0
+    ),
 )
 
 SUBJECTS: dict[str, Subject] = {subject.name: subject for subject in (PETSTORE, GOOGLE_DRIVE, FINERACT)}

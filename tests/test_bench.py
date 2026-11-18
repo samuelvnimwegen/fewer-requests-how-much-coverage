@@ -7,8 +7,10 @@ from fake_restcov import FakeRestCov
 
 from lesstests.api import ApiDescription
 from lesstests.bench import Benchmark, BenchReport
+from lesstests.code_coverage import BenchCode
 from lesstests.coverage import CoverageSet
 from lesstests.exchange import Body, Exchange, Headers, HttpRequest, HttpResponse
+from lesstests.jacoco import CodeCounts, CodeKept
 from lesstests.java import JavaTest, Outcome, SuiteRun
 from lesstests.proxy import Address
 from lesstests.versions import SuiteVersion, VersionPlan
@@ -209,3 +211,117 @@ def test_a_saved_run_that_never_started_gets_another_go_on_resume(tmp_path: Path
     runs = benchmark.run(tmp_path / "bench", rounds=1, warmup=0)
     assert all(run.started for run in runs)
     assert sorted(working.order) == [1, 2, 4]
+
+
+class FakeCode:
+    def __init__(self, on: bool = True) -> None:
+        self.calls: list[str] = []
+        self._on = on
+
+    @property
+    def on(self) -> bool:
+        return self._on
+
+    def clear(self) -> None:
+        self.calls.append("clear")
+
+    def dump(self, path: Path) -> None:
+        self.calls.append(f"dump {path.name}")
+
+    def idle(self, path: Path) -> None:
+        self.calls.append("idle")
+
+    def classes(self, target: Path) -> None:
+        pass
+
+    def facts(self) -> dict[str, bool]:
+        return {"code_coverage": self._on}
+
+
+class LoggingRunner(FakeRunner):
+    def __init__(self, log: FakeLog, calls: list[str]) -> None:
+        super().__init__(log)
+        self.calls = calls
+
+    def run_suite(self, tests: list[JavaTest], name: str) -> SuiteRun:
+        self.calls.append(f"run {name}")
+        return super().run_suite(tests, name)
+
+
+def _bench_with(tmp_path: Path, code: FakeCode) -> Benchmark:
+    spec = tmp_path / "spec.json"
+    spec.write_text(json.dumps(SPEC))
+    log = FakeLog()
+    measure = (FakeRestCov(), ApiDescription.load(spec))
+    runner = LoggingRunner(log, code.calls)
+    return Benchmark(_plan(), runner, contextlib.nullcontext(), log, FakeService(), measure, code)
+
+
+def test_every_run_starts_its_code_counters_from_zero_and_dumps_them(tmp_path: Path) -> None:
+    code = FakeCode()
+    _bench_with(tmp_path, code).run(tmp_path / "bench", rounds=1, warmup=1)
+    assert code.calls == [
+        "clear",
+        "run testng/warmup-1",
+        "dump warmup-1.exec",
+        "clear",
+        "run testng/round-1-original",
+        "dump round-1-original.exec",
+        "clear",
+        "run testng/round-1-select",
+        "dump round-1-select.exec",
+        "clear",
+        "run testng/round-1-select-merge",
+        "dump round-1-select-merge.exec",
+    ]
+
+
+@pytest.mark.parametrize(("first", "second"), [(True, False), (False, True)])
+def test_a_bench_folder_never_mixes_runs_with_and_without_the_agent(tmp_path: Path, first: bool, second: bool) -> None:
+    _bench_with(tmp_path, FakeCode(first)).run(tmp_path / "bench", rounds=1, warmup=0)
+    with pytest.raises(ValueError, match="JaCoCo agent"):
+        _bench_with(tmp_path, FakeCode(second)).run(tmp_path / "bench", rounds=2, warmup=0)
+
+
+def test_a_bench_folder_from_before_code_coverage_resumes_without_the_agent(tmp_path: Path) -> None:
+    benchmark, _, _ = _bench(tmp_path)
+    benchmark.run(tmp_path / "bench", rounds=1, warmup=0)
+    (tmp_path / "bench" / "runs" / "agent.json").unlink()
+    benchmark.run(tmp_path / "bench", rounds=2, warmup=0)
+    with pytest.raises(ValueError, match="without the JaCoCo agent"):
+        _bench_with(tmp_path, FakeCode()).run(tmp_path / "bench", rounds=2, warmup=0)
+
+
+def test_the_report_adds_the_code_each_version_kept_of_its_rounds_original(tmp_path: Path) -> None:
+    benchmark, _, _ = _bench(tmp_path)
+    runs = benchmark.run(tmp_path / "bench", rounds=2, warmup=0)
+    full = CodeCounts(100, 40, 20)
+
+    def kept(lines: int) -> CodeKept:
+        return CodeKept(CodeCounts(lines, 10, 5), full)
+
+    code = BenchCode(
+        {
+            **{("Original", number): CodeKept(full, full) for number in (1, 2)},
+            ("Select", 1): kept(80),
+            ("Select", 2): kept(90),
+            **{("Select + Merge", number): kept(50) for number in (1, 2)},
+        },
+        {
+            1: CodeKept(CodeCounts(90, 40, 20), CodeCounts(100, 40, 20)),
+            2: CodeKept(CodeCounts(99, 40, 20), CodeCounts(100, 40, 20)),
+            3: CodeKept(CodeCounts(95, 40, 20), CodeCounts(100, 40, 20)),
+        },
+    )
+    report = BenchReport(_plan(), runs, 0, code).markdown()
+    assert "| Lines kept | Branches kept | Methods kept |" in report
+    select = next(line for line in report.splitlines() if line.startswith("| Select |"))
+    assert select.endswith("| 85.0% of 100 | 25.0% of 40 | 25.0% of 20 |")
+    assert "the Original runs reached a median of 95.0% of the 100 lines, 100.0% of the 40 branches" in report
+
+
+def test_the_dumps_of_counted_runs_must_all_be_there(tmp_path: Path) -> None:
+    benchmark, _, _ = _bench(tmp_path)
+    runs = benchmark.run(tmp_path / "bench", rounds=1, warmup=0)
+    with pytest.raises(FileNotFoundError, match="round-1-original.exec"):
+        Benchmark.dumps(tmp_path / "bench", runs)

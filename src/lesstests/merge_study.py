@@ -1,12 +1,15 @@
 """Runs the Merge step on a recording and writes the merge folder that the benchmark reads."""
 
 import json
+import shutil
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from lesstests.api import ApiDescription
+from lesstests.code_coverage import RecordingCode
 from lesstests.coverage import RestCov, SuiteCoverage
+from lesstests.jacoco import JaCoCo
 from lesstests.java import BuiltProject, JavaTest, Overlay
 from lesstests.merge import MergedTest, MergeOutcome, MergePlanner, Merger
 from lesstests.recording import RecordedTest, Recorder, Recording
@@ -19,12 +22,20 @@ Progress = Callable[[int, int, RecordedTest], None]
 class MergeRoundRunner:
     """Compiles the project with one round of merged copies and records each copy alone through the proxy."""
 
-    def __init__(self, subject: Subject, meta: dict[str, Any], env: dict[str, str], progress: Progress | None) -> None:
-        """Keep what every round needs to rebuild the project and reach the API."""
+    def __init__(
+        self,
+        subject: Subject,
+        meta: dict[str, Any],
+        env: dict[str, str],
+        progress: Progress | None,
+        jacoco: JaCoCo | None = None,
+    ) -> None:
+        """Keep what every round needs to rebuild the project and reach the API. With `jacoco`, the agent runs too."""
         self._subject = subject
         self._meta = meta
         self._env = env
         self._progress = progress
+        self._jacoco = jacoco
 
     def project(self, edited: dict[Path, str], folder: Path) -> BuiltProject:
         """Copy and compile the project with the edited test files on top of the subject's own overlays.
@@ -51,11 +62,12 @@ class MergeRoundRunner:
         """
         print(f"Compiling round {folder.name} with {len(merged)} merged tests ...", flush=True)
         built = self.project(edited, folder)
-        connection = self._subject.connect(self._env)
+        connection = self._subject.connect(self._env, self._jacoco)
         recording = Recording(folder / "recording")
         runner = Runners.of(self._subject, built, folder / "testng", connection.settings)
         suite = self._subject.toolchain.suite(built, self._meta["package"], connection.settings)
-        recorder = Recorder(suite, runner, connection.service, connection.proxy, recording, self._subject.reset_policy)
+        reset = self._subject.reset_policy
+        recorder = Recorder(suite, runner, connection.service, connection.proxy, recording, reset, connection.code)
         recorder.run(self._meta, self._progress, [merge.test for merge in merged])
         return {record.test: record for record in recording.records()}
 
@@ -138,14 +150,19 @@ class MergeStudy:
         env: dict[str, str],
         rounds: int,
         progress: Progress | None = None,
+        code: RecordingCode | None = None,
     ) -> None:
-        """Keep the recording with its coverage, the credentials for the live rounds, and the round limit."""
+        """Keep the recording with its coverage, the credentials for the live rounds, and the round limit.
+
+        With `code`, the rounds run the server with the JaCoCo agent and the plan counts server code.
+        """
         self._recording = recording
         self._restcov = restcov
         self._coverage = coverage
         self._env = env
         self._rounds = rounds
         self._progress = progress
+        self._code = code
 
     def run(self, out: Path) -> VersionPlan:
         """Merge, record the merged tests, compile the final project, measure the kept merges and plan.
@@ -165,7 +182,8 @@ class MergeStudy:
         api = ApiDescription.load(Path(meta["spec"]), meta.get("restcov_base_path"))
         records = self._recording.records()
         MergePlanner.check_matching(records, api, self._coverage)
-        runner = MergeRoundRunner(subject, meta, self._env, self._progress)
+        jacoco = self._code.jacoco if self._code else None
+        runner = MergeRoundRunner(subject, meta, self._env, self._progress, jacoco)
         planner = MergePlanner(records, api, self._recording.project_folder / "src" / "test" / "java")
         outcome = Merger(planner, runner, api, self._rounds).run(out / "rounds")
         folder.save({**meta, "recording": str(self._recording.folder)}, outcome, planner.skipped)
@@ -177,21 +195,41 @@ class MergeStudy:
             merged = Recording(out / "merged")
             for record in outcome.records.values():
                 merged.save(record)
+                if self._code:
+                    self._copy_dump(out / "rounds", merged, record.test)
             merged.write_meta(meta)
             merged_records = merged.records()
             merged_part = (SuiteCoverage.measure(merged, self._restcov, merged.folder / "coverage"), merged_records)
         plan = VersionPlanner(api, (self._coverage, records)).plan_with_merge(merged_part)
+        if self._code:
+            code = self._code.with_merged(Recording(out / "merged")) if outcome.accepted else self._code
+            code.annotate(plan)
         folder.save_plan(plan)
         return plan
+
+    @staticmethod
+    def _copy_dump(rounds: Path, merged: Recording, test: JavaTest) -> None:
+        """Copy the dump of a kept merge from the round that recorded it. Merged tests have ids no round shares.
+
+        Raises:
+            FileNotFoundError: If no round, or more than one, holds it.
+        """
+        found = sorted(rounds.glob(f"*/recording/code-coverage/exec/{test.id}.exec"))
+        if len(found) != 1:
+            raise FileNotFoundError(f"Expected one code coverage dump for {test.id} in {rounds}, found {len(found)}")
+        target = merged.exec_of(test)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(found[0], target)
 
 
 class PlanStudy:
     """Plans Original and Select from a recording without Merge, for a suite Merge can't rewrite, like Fineract."""
 
-    def __init__(self, recording: Recording, coverage: SuiteCoverage) -> None:
-        """Keep the recording with its coverage."""
+    def __init__(self, recording: Recording, coverage: SuiteCoverage, code: RecordingCode | None = None) -> None:
+        """Keep the recording with its coverage, and its server code coverage when it has some."""
         self._recording = recording
         self._coverage = coverage
+        self._code = code
 
     def run(self, out: Path) -> str:
         """Write the folder the benchmark reads. It names the recording's copy, so nothing gets built again.
@@ -205,6 +243,8 @@ class PlanStudy:
         api = ApiDescription.load(Path(meta["spec"]), meta.get("restcov_base_path"))
         records = self._recording.records()
         plan = VersionPlanner(api, (self._coverage, records)).plan()
+        if self._code is not None:
+            self._code.annotate(plan)
         recording = str(self._recording.folder)
         folder.save_meta({**meta, "recording": recording, "copy": str(self._recording.project_folder)})
         single = sum(record.requests == 1 for record in records)
