@@ -4,12 +4,14 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from lesstests.api import ApiDescription
 from lesstests.code_coverage import RecordingCode
 from lesstests.coverage import CoverageSet, Criterion, RestCov, SuiteCoverage
 from lesstests.jacoco import CodeKept
 from lesstests.java import JavaTest, Outcome
 from lesstests.recording import Recording
-from lesstests.selection import Budget, CoverageMatrix, CoverageSelector, RandomSelector, Selector
+from lesstests.selection import Budget, CoverageMatrix, CoverageSelector, CoverOptions, RandomSelector, Selector
+from lesstests.versions import VersionPlanner
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,6 +169,40 @@ class SelectionStudy:
         lost.unlink(missing_ok=True)
         if report.has_code:
             lost.write_text(report.code_lost(), encoding="utf-8")
+
+
+class CoverStudy:
+    """Measure the minimum cover against the full recording."""
+
+    def __init__(
+        self, recording: Recording, coverage: SuiteCoverage, restcov: RestCov, code: RecordingCode | None
+    ) -> None:
+        """Keep the inputs used for selection and independent measurement."""
+        self._recording = recording
+        self._coverage = coverage
+        self._restcov = restcov
+        self._code = code
+
+    def run(self, out: Path, options: CoverOptions, passing_only: bool) -> None:
+        """Write the chosen tests and verify their joined coverage against RESTCov.
+
+        Raises:
+            ValueError: If RESTCov disagrees with the predicted cover.
+        """
+        meta = self._recording.meta()
+        api = ApiDescription.load(Path(meta["spec"]), meta.get("restcov_base_path"))
+        plan = VersionPlanner(api, (self._coverage, self._recording.records())).plan(options, passing_only)
+        selected = plan.versions[1]
+        logs = self._recording.gather_logs(selected.tests, out / "logs" / "cover")
+        if selected.tests and self._restcov.measure(logs, out / "restcov" / "cover").items() != selected.coverage:
+            raise ValueError("RESTCov and the joined items differ for Select")
+        if self._code is not None:
+            self._code.annotate(plan)
+        groups = {version.name: version.to_dict() for version in plan.versions}
+        result = {**plan.settings(), "passing_only": passing_only, "groups": groups}
+        (out / "selection.json").write_text(json.dumps(result, indent=1), encoding="utf-8")
+        (out / "report.md").write_text(plan.markdown(), encoding="utf-8")
+        (out / "code-lost.md").unlink(missing_ok=True)
 
 
 class StudyReport:

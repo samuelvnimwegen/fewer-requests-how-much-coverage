@@ -511,3 +511,50 @@ def test_every_command_on_a_recording_with_code_coverage_checks_the_helper_first
     args = cli.argparse.Namespace(jacoco=_jacoco_folder(tmp_path))
     assert cli.JaCoCoOption.recording_code(args, recording) is not None
     assert checked == [True]
+
+
+def test_cover_commands_agree_on_the_minimum_and_report_each_enabled_family(
+    tmp_path: Path, restcov: tuple[FakeRestCov, list[tuple[Path, Path]]]
+) -> None:
+    """Requirement: Select and plan report the same cover and count the traffic it keeps."""
+    (tmp_path / "spec.json").write_text(json.dumps({"paths": {"/orders": {"post": {}}}}))
+    recording = Recording(tmp_path / "cover")
+    recording.write_meta({"spec": str(tmp_path / "spec.json")})
+    for name, values in [("cheap", [True]), ("both", [True, False]), ("costly", [False, True, True])]:
+        exchanges = [
+            Exchange(
+                HttpRequest("POST", "/orders?command=open", Headers(), Body(json.dumps({"ok": v}).encode())),
+                HttpResponse(200, "OK", Headers(), Body()),
+            )
+            for v in values
+        ]
+        recording.save(RecordedTest(JavaTest("suite.Api", name), Outcome.PASSED, 1, exchanges))
+    common = [
+        "--recording",
+        str(recording.folder),
+        "--restcov",
+        "fake",
+        "--objective",
+        "tests",
+        "--traffic",
+        "commands,modes,fields,readbacks",
+    ]
+    out = tmp_path / "plan"
+    cli.main(["plan", *common, "--out", str(out)])
+    cli.main(["select", *common])
+    selected = json.loads((recording.folder / "selection" / "selection.json").read_text())["groups"]["Select"]
+    planned = json.loads((out / "plan.json").read_text())["versions"][1]
+    assert selected["tests"] == planned["tests"] == ["suite.Api.both"]
+    assert selected["requests"] == planned["requests"] == 2
+    assert selected["traffic"] == planned["traffic"] == {"commands": 1, "modes": 2, "fields": 1, "readbacks": 0}
+    for report in [out / "plan.md", recording.folder / "selection" / "report.md"]:
+        assert "| modes | 2 | 2 |" in report.read_text()
+        assert "| readbacks | 0 | 0 |" in report.read_text()
+
+
+@pytest.mark.parametrize("options", [["--traffic", "other"], ["--traffic-share", "nan"], ["--traffic-share", "1.01"]])
+def test_invalid_traffic_options_fail_before_reading_the_recording(options: list[str]) -> None:
+    """Requirement: Both commands reject invalid families and shares before measuring coverage."""
+    for command in [["select"], ["plan", "--out", "unused"]]:
+        with pytest.raises(SystemExit):
+            cli.main([*command, "--recording", "missing", *options])

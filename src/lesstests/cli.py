@@ -13,8 +13,8 @@ from lesstests.coverage import RestCov, SuiteCoverage
 from lesstests.jacoco import JaCoCo
 from lesstests.merge_study import MergeFolder, MergeStudy, PlanStudy
 from lesstests.recording import RecordedTest, Recorder, Recording
-from lesstests.selection import Budget
-from lesstests.study import SelectionStudy
+from lesstests.selection import Budget, CoverOptions
+from lesstests.study import CoverStudy, SelectionStudy
 from lesstests.subjects import SUBJECTS, Runners, SuiteCatalog
 from lesstests.versions import VersionPlan
 
@@ -258,7 +258,38 @@ class CoverageCommand(RecordingCommand):
                 print(f"{len(checked.missing)} of the classes ran without a class file, such as {checked.missing[0]}")
 
 
-class SelectCommand(RecordingCommand):
+class CoverCommand(RecordingCommand):
+    """Options shared by the two commands that can select a minimum cover."""
+
+    def add_arguments(self, parser: argparse.ArgumentParser) -> None:
+        """Declare the minimum cover and its traffic constraints."""
+        super().add_arguments(parser)
+        parser.add_argument("--objective", choices=["tests"], help="keep the fewest tests, then the fewest requests")
+        parser.add_argument("--traffic", help="comma separated families: commands,modes,fields,readbacks")
+        parser.add_argument("--traffic-share", type=float, help="minimum share of enabled traffic items, default 1")
+
+    @staticmethod
+    def options(args: argparse.Namespace) -> CoverOptions | None:
+        """Read the settings only when minimum cover selection was requested.
+
+        Returns:
+            The cover settings or None for the original command.
+
+        Raises:
+            SystemExit: If a family or share is invalid.
+        """
+        if args.objective is None and args.traffic is None and args.traffic_share is None:
+            return None
+        names = (
+            tuple(dict.fromkeys(name.strip() for name in args.traffic.split(","))) if args.traffic is not None else ()
+        )
+        try:
+            return CoverOptions(names, 1 if args.traffic_share is None else args.traffic_share)
+        except ValueError as error:
+            raise SystemExit(str(error)) from error
+
+
+class SelectCommand(CoverCommand):
     """Builds the Selected and Random versions of the suite at each budget and reports the coverage they lose."""
 
     name = "select"
@@ -267,21 +298,32 @@ class SelectCommand(RecordingCommand):
     def add_arguments(self, parser: argparse.ArgumentParser) -> None:
         """Declare the recording, RESTCov, the budgets and the draws."""
         super().add_arguments(parser)
-        parser.add_argument("--budgets", type=float, nargs="+", default=[75, 50, 25], help="percentages to keep")
-        parser.add_argument("--draws", type=int, default=30, help="random draws per budget")
-        parser.add_argument("--seed", type=int, default=1)
+        parser.add_argument("--budgets", type=float, nargs="+", help="percentages to keep")
+        parser.add_argument("--draws", type=int, help="random draws per budget")
+        parser.add_argument("--seed", type=int)
         parser.add_argument("--passing-only", action="store_true", help="only pick tests that passed alone")
 
     def run(self, args: argparse.Namespace) -> None:
-        """Run the study and print the report."""
+        """Run the study and print the report.
+
+        Raises:
+            SystemExit: If a budget study option is used with the minimum cover.
+        """
+        options = self.options(args)
+        if options and any(value is not None for value in (args.budgets, args.draws, args.seed)):
+            raise SystemExit("Budgets, draws and seed apply only to the fixed budget study")
         recording = Recording(args.recording.resolve())
         restcov = RestCovOption.restcov(args, recording.meta())
         coverage = self.coverage(recording, restcov)
-        budgets = [Budget(percent / 100) for percent in args.budgets]
         out = recording.folder / "selection"
         code = JaCoCoOption.recording_code(args, recording)
-        study = SelectionStudy(recording, coverage, restcov, budgets, args.draws, args.seed, args.passing_only, code)
-        study.run(out)
+        if options is not None:
+            CoverStudy(recording, coverage, restcov, code).run(out, options, args.passing_only)
+        else:
+            budgets = [Budget(percent / 100) for percent in args.budgets or [75, 50, 25]]
+            draws = 30 if args.draws is None else args.draws
+            seed = 1 if args.seed is None else args.seed
+            SelectionStudy(recording, coverage, restcov, budgets, draws, seed, args.passing_only, code).run(out)
         print((out / "report.md").read_text(encoding="utf-8"))
 
 
@@ -308,7 +350,7 @@ class MergeCommand(RecordingCommand):
         print(study.run(args.out.resolve()).markdown())
 
 
-class PlanCommand(RecordingCommand):
+class PlanCommand(CoverCommand):
     """Plans Original and Select without the Merge step, for a suite Merge can't rewrite."""
 
     name = "plan"
@@ -321,10 +363,11 @@ class PlanCommand(RecordingCommand):
 
     def run(self, args: argparse.Namespace) -> None:
         """Pick Select's tests and write the folder the benchmark reads."""
+        options = self.options(args)
         recording = Recording(args.recording.resolve())
         coverage = self.coverage(recording, RestCovOption.restcov(args, recording.meta()))
         code = JaCoCoOption.recording_code(args, recording)
-        print(PlanStudy(recording, coverage, code).run(args.out.resolve()))
+        print(PlanStudy(recording, coverage, code).run(args.out.resolve(), options))
 
 
 class BenchCommand:

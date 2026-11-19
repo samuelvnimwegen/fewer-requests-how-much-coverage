@@ -55,6 +55,26 @@ uv run lesstests bench --plan runs/fineract-plan --rounds 3
 
 `--subject` is `petstore` (the default), `google-drive` or `fineract`. `--suite` is `single-agent` or `multi-agent`, or `integration-tests` for Fineract. `--only` records only the tests whose id matches a regular expression, which is handy for a first try on a few classes. A later run without `--only` on the same folder records the rest. `record` picks up where it stopped when it runs again on the same folder. It stops if the subject, suite, project, spec or image differ from the first run, or if a recorded test left the suite. The project is copied without its `target/` and `.git` folders, or `build/`, `.gradle/` and `.git` for Gradle, so `--out` must sit outside it. TestNG tests need `@Test` on each method. A class level `@Test` stops the run. `select` reuses the saved coverage until the recording changes. It takes `--budgets` (default `75 50 25`), `--draws` (default 30), `--seed` and `--passing-only`, which lets both selectors pick only from tests that passed alone. `merge` takes `--rounds` (default 4) and refuses an `--out` inside the recording, since the recording's project copy is the source of every merge. A copy that doesn't compile only drops itself. `plan` takes `--out` and writes the folder `bench` reads, with Original and Select only. `bench --plan` reads a folder of `merge` or `plan` (`--merge` still works). It takes `--rounds` (default 10), `--warmup` (default 1) and `--out`, and keeps the runs it already made, so a stopped benchmark resumes. It refuses a folder that holds runs of another plan. `record`, `merge` and `bench` take `--env-file`. `record --code-coverage` runs the server with the JaCoCo agent. A recording made with it and one made without it never resume into each other, and `coverage`, `select`, `merge`, `plan` and `bench` count code coverage whenever the recording has it. `bench --no-code-coverage` runs a plan without the agent, such as to time what the agent costs. A bench folder refuses runs with the agent switched the other way.
 
+### Selecting the fewest tests
+
+I use the following command to keep every RESTCov item and every observed command and mode. Among the suites with the fewest tests, Select picks one with the fewest requests.
+
+```bash
+uv run lesstests select --recording runs/fineract --objective tests --traffic commands,modes
+uv run lesstests plan --recording runs/fineract --out runs/fineract-plan --objective tests --traffic commands,modes,fields,readbacks --traffic-share 0.95
+```
+
+I can leave out `--traffic` to keep RESTCov alone. With traffic enabled, the default share is 1. A share of 0.95 requires at least 95 percent of the distinct items across the enabled families together. Every RESTCov item is still required. The report gives the full and kept counts per family.
+
+| Family | What one item means |
+|---|---|
+| `commands` | One operation sent one value of the `command` query parameter. |
+| `modes` | One operation sent one value of a boolean or choice field. I keep fields with two through twelve observed values. Choice names end in type, method, strategy, strategyCode, rule, frequency, calculation or enabled. |
+| `fields` | One operation sent a JSON leaf field. Array positions count as the same path. |
+| `readbacks` | A successful POST returned an integer `resourceId`. A later successful GET of that resource returned the same top level scalar field with the same type and value in that test. |
+
+`select --objective tests` writes the chosen tests under `groups.Select.tests` in `selection/selection.json`. Budgets, draws and seeds belong to the fixed budget study. With `--passing-only`, only passing tests may be picked. The full recording still defines the required coverage, so a cover can be infeasible.
+
 ## Output
 
 | Path | What it holds |
