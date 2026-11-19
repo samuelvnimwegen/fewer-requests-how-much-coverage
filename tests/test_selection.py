@@ -3,6 +3,7 @@ import pytest
 from lesstests.coverage import CoverageItem, CoverageSet, Criterion, SuiteCoverage
 from lesstests.java import JavaTest
 from lesstests.selection import Budget, CoverageMatrix, CoverageSelector, RandomSelector, SmallestCover
+from lesstests.traffic import TrafficCoverage
 
 
 def _test(name: str) -> JavaTest:
@@ -104,3 +105,24 @@ def test_smallest_cover_refuses_a_target_nobody_reaches() -> None:
     target = CoverageSet([CoverageItem(Criterion.STATUS, "2")])
     with pytest.raises(ValueError, match="No candidate reaches 1"):
         SmallestCover().select(candidates, {_test("a"): 1}, target)
+
+
+@pytest.mark.parametrize(("share", "picked"), [(0, ["cheap"]), (0.5, ["wide"]), (0.67, ["other", "wide"])])
+def test_partial_cover_keeps_restcov_and_rounds_up_the_combined_traffic_share(share: float, picked: list[str]) -> None:
+    """Requirement: Every RESTCov item stays covered even when only a share of traffic is required."""
+    candidates = _sets({"cheap": {"a"}, "wide": {"a"}, "costly": {"a"}, "other": set()})
+    requests = {_test("cheap"): 1, _test("wide"): 10, _test("costly"): 20, _test("other"): 1}
+    both = {_test("wide"), _test("costly")}
+    traffic = TrafficCoverage({"commands": {("x",): both, ("y",): both}, "fields": {("z",): {_test("other")}}})
+    target = CoverageSet.union(candidates.values())
+    assert SmallestCover().select(candidates, requests, target, traffic, share) == [_test(name) for name in picked]
+
+
+def test_traffic_share_counts_items_that_no_eligible_test_witnesses() -> None:
+    """Requirement: Restricting the candidate tests must preserve the full traffic target."""
+    eligible = _test("passing")
+    traffic = TrafficCoverage({"fields": {("x",): {eligible}, ("y",): {_test("failed")}}})
+    selector = SmallestCover()
+    assert selector.select({eligible: CoverageSet()}, {eligible: 0}, CoverageSet(), traffic, 0.5) == [eligible]
+    with pytest.raises(ValueError, match="eligible tests"):
+        selector.select({eligible: CoverageSet()}, {eligible: 0}, CoverageSet(), traffic, 1)
