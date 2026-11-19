@@ -250,13 +250,16 @@ class SmallestCover:
         count = np.r_[np.ones(len(tests)), indicators]
         bounds = Bounds(0, 1)
         options = {"mip_rel_gap": 0.0} if traffic is not None else None
-        fewest_tests = milp(count, constraints=constraints, integrality=count, bounds=bounds, options=options)
+
+        # The group indicators are whole numbers too. A fraction inside the solver's tolerance would count as an item.
+        whole = np.ones(variables)
+        fewest_tests = milp(count, constraints=constraints, integrality=whole, bounds=bounds, options=options)
         if not fewest_tests.success:
             raise RuntimeError(f"The cover program failed: {fewest_tests.message}")
         size = round(fewest_tests.fun)
         constraints.append(LinearConstraint(count, size, size))
         cost = np.r_[[requests[test] for test in tests], indicators]
-        cheapest = milp(cost, constraints=constraints, integrality=count, bounds=bounds, options=options)
+        cheapest = milp(cost, constraints=constraints, integrality=whole, bounds=bounds, options=options)
         if not cheapest.success:
             raise RuntimeError(f"The request program failed: {cheapest.message}")
         return [test for test, chosen in zip(tests, cheapest.x[: len(tests)], strict=True) if chosen > 0.5]

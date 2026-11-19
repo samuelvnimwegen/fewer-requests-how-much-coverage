@@ -126,3 +126,12 @@ def test_traffic_share_counts_items_that_no_eligible_test_witnesses() -> None:
     assert selector.select({eligible: CoverageSet()}, {eligible: 0}, CoverageSet(), traffic, 0.5) == [eligible]
     with pytest.raises(ValueError, match="eligible tests"):
         selector.select({eligible: CoverageSet()}, {eligible: 0}, CoverageSet(), traffic, 1)
+
+
+def test_a_tiny_traffic_share_still_needs_a_test_that_shows_an_item() -> None:
+    """Requirement: A required traffic item is never credited without a picked test that shows it."""
+    wide, other = _test("wide"), _test("other")
+    candidates = _sets({"wide": set(), "other": {"a"}})
+    traffic = TrafficCoverage({"fields": {(str(i),): {wide} for i in range(100_000)}})
+    target = CoverageSet.union(candidates.values())
+    assert SmallestCover().select(candidates, {wide: 5, other: 1}, target, traffic, 0.00001) == [other, wide]

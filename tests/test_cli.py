@@ -556,5 +556,5 @@ def test_cover_commands_agree_on_the_minimum_and_report_each_enabled_family(
 def test_invalid_traffic_options_fail_before_reading_the_recording(options: list[str]) -> None:
     """Requirement: Both commands reject invalid families and shares before measuring coverage."""
     for command in [["select"], ["plan", "--out", "unused"]]:
-        with pytest.raises(SystemExit):
+        with pytest.raises(SystemExit, match="Unknown traffic families|Traffic share must be"):
             cli.main([*command, "--recording", "missing", *options])

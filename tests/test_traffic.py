@@ -1,3 +1,4 @@
+import gzip
 import json
 
 import pytest
@@ -94,3 +95,69 @@ def test_readback_excludes_invalid_witnesses(event: str) -> None:
     read = _exchange("GET", path, result={"colour": "red"}, status=400 if event == "failed read" else 200)
     between = {"update": [_exchange("PATCH", path)], "duplicate": [create]}.get(event, [])
     assert _traffic([_record("a", create, *between, read)], "readbacks").witnesses == {"readbacks": {}}
+
+
+def test_a_gzip_body_gives_the_same_fields_as_a_plain_one() -> None:
+    """Requirement: A request body sent with gzip counts its fields like an uncompressed body."""
+    data = json.dumps({"items": [[{"colour": "red"}]]}).encode()
+    packed = Exchange(
+        HttpRequest("POST", "/api/orders/new", Headers((("Content-Encoding", "gzip"),)), Body(gzip.compress(data))),
+        HttpResponse(200, "", Headers(), Body()),
+    )
+    broken = Exchange(
+        HttpRequest("POST", "/api/orders/new", Headers((("Content-Encoding", "gzip"),)), Body(data)),
+        HttpResponse(200, "", Headers(), Body()),
+    )
+    a, b = _record("a", packed), _record("b", broken)
+    assert _traffic([a, b], "fields").witnesses["fields"] == {("POST /orders/new", ".items[][].colour"): {a.test}}
+
+
+def test_a_path_of_the_requests_own_method_wins_over_a_literal_path_of_another_method() -> None:
+    """Requirement: A request belongs to an operation of its own method when one covers its path."""
+    full = CoverageSet(
+        [
+            CoverageItem(Criterion.PATH, "/orders/new"),
+            CoverageItem(Criterion.PATH, "/orders/{id}"),
+            CoverageItem(Criterion.OPERATION, "GET /orders/new"),
+            CoverageItem(Criterion.OPERATION, "put /orders/{id}"),
+        ]
+    )
+    a = _record("a", _exchange("PUT", "/api/orders/new?command=x"), _exchange("GET", "/api/orders/new?command=y"))
+    b = _record("b", _exchange("PUT", "/api/orders/old?command=x"))
+    commands = TrafficCoverage.collect([a, b], ApiDescription([], ["/api"]), full, ("commands",)).witnesses["commands"]
+    assert commands == {("PUT /orders/{id}", "x"): {a.test, b.test}, ("GET /orders/new", "y"): {a.test}}
+
+
+def test_a_named_choice_inside_an_array_is_a_mode() -> None:
+    """Requirement: A choice field that holds a list still gives one mode per value."""
+    a = _record("a", _exchange("POST", "/api/orders/new", {"paymentMethod": ["cash", "card"]}))
+    assert set(_traffic([a], "modes").witnesses["modes"]) == {
+        ("POST /orders/new", ".paymentMethod[]", '"cash"'),
+        ("POST /orders/new", ".paymentMethod[]", '"card"'),
+    }
+
+
+def test_a_body_nested_deeper_than_the_decoder_allows_gives_no_fields() -> None:
+    """Requirement: A body the JSON decoder cannot walk gives no fields and no crash."""
+    deep = Exchange(
+        HttpRequest("POST", "/api/orders/new", Headers(), Body(b"[" * 100_000 + b"0" + b"]" * 100_000)),
+        HttpResponse(200, "", Headers(), Body()),
+    )
+    assert _traffic([_record("a", deep)], "fields").witnesses["fields"] == {}
+
+
+def test_a_rejected_update_keeps_the_readback_and_another_host_gives_none() -> None:
+    """Requirement: Only a successful change on the same host ends a pending read back."""
+
+    def on(host: str, exchange: Exchange) -> Exchange:
+        request = exchange.request
+        return Exchange(
+            HttpRequest(request.method, request.target, Headers((("Host", host),)), request.body), exchange.response
+        )
+
+    create = _exchange("POST", "/orders", {"colour": "red"}, {"resourceId": 7}, 201)
+    rejected = _exchange("PATCH", "/orders/7", status=403)
+    read = _exchange("GET", "/orders/7", result={"colour": "red"})
+    a = _record("a", on("a.example", create), on("a.example", rejected), on("a.example", read))
+    b = _record("b", on("a.example", create), on("b.example", read))
+    assert _traffic([a, b], "readbacks").witnesses == {"readbacks": {("/orders", "colour"): {a.test}}}
