@@ -1,4 +1,4 @@
-# Less Tests More Power: scope description
+# Fewer Requests, How Much Coverage?: scope description
 
 I keep every version of the scope description for my master's thesis here. I'm doing the thesis at the University of Antwerp in the LORE research group. My promotor is Prof. Serge Demeyer and my daily supervisor is Tolgahan Bardakci.
 
