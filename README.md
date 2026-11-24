@@ -8,14 +8,14 @@ Newest first.
 
 | Version | Date | Status | PDF |
 |---|---|---|---|
-| 1.3 | 22 November 2026 | Waiting for review | [Scope v1.3](versions/v1.3/Scope_Samuel_van_Nimwegen_v1.3.pdf) |
+| 1.3 | 22 November 2026 | Will be sent to Prof. Demeyer | [Scope v1.3](versions/v1.3/Scope_Samuel_van_Nimwegen_v1.3.pdf) |
 | 1.2 | 12 November 2026 | Reviewed, replaced by 1.3 | [Scope v1.2](versions/v1.2/Scope_Samuel_van_Nimwegen_v1.2.pdf) |
 | 1.1 | 20 October 2026 | Reviewed, replaced by 1.2 | [Scope v1.1](versions/v1.1/Scope_Samuel_van_Nimwegen_v1.1.pdf) |
 | 1.0 | 29 September 2026 | Reviewed, replaced by 1.1 | [Scope v1.0](versions/v1.0/Scope_Samuel_van_Nimwegen_v1.0.pdf) |
 
 ## What changed in 1.3
 
-I worked in the suggestions on scope 1.2.
+I worked in the suggestions on scope 1.2. This is the version that will be sent to Prof. Demeyer.
 
 * The text says "test suite reduction" instead of "test selection". The subtitle is now "Shared Setup and Test Suite Reduction for REST APIs", and the step of the tool is called Reduce.
 * There are three research questions instead of five. One is about sharing setup, one about test suite reduction and one about boundary values.
