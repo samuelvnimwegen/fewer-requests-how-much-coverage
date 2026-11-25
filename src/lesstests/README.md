@@ -72,8 +72,21 @@ I can leave out `--traffic` to keep RESTCov alone. With traffic enabled, the def
 | `modes` | One operation sent one value of a boolean or choice field. I keep fields with two through twelve observed values. Choice names end in type, method, strategy, strategyCode, rule, frequency, calculation or enabled. |
 | `fields` | One operation sent a JSON leaf field. Array positions count as the same path. |
 | `readbacks` | A successful POST returned an integer `resourceId`. A later successful GET of that resource returned the same top level scalar field with the same type and value in that test. |
+| `parameter_values` | I count each query value and each value captured by a path parameter, by operation, location and parameter name. |
+| `request_values` | I count each scalar value at a request field path. JSON types stay distinct. |
+| `response_fields` | I count each response leaf path by operation and HTTP status. |
+| `response_values` | I count scalar response values shorter than 64 characters when the same operation, status and field have two through twelve distinct short values. |
+| `operation_pairs` | I count two consecutive operations in the same test, in order. |
 
 `select --objective tests` writes the chosen tests under `groups.Select.tests` in `selection/selection.json`. Budgets, draws and seeds belong to the fixed budget study. With `--passing-only`, only passing tests may be picked. The full recording still defines the required coverage, so a cover can be infeasible.
+
+### Ranking coverage items
+
+I use `uv run lesstests rank --recording runs/fineract --out results/fineract` to compare each traffic family and each RESTCov level. I get one minimum cover for the family alone and one with all RESTCov items required too. The report counts the items that only one test showed.
+
+When I have recorded server coverage, I get the lines, branches and methods reached by each cover and the count per kept test. The rows are ordered by lines per test. I also get the fraction of visits that add a new method among visits that add a new family item, over 30 shuffled test orders. Suites can reach different code at the same minimum test and request counts.
+
+I read `report.md` for the tables and `ranking.json` for the selected test names and full counts. If I omit `--out`, both go in the recording's `ranking` folder. I can use a folder outside the recording to keep the recording read only. The command takes the same RESTCov and JaCoCo paths as `select`.
 
 ## Output
 
