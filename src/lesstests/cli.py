@@ -10,6 +10,7 @@ from lesstests.api import ApiDescription
 from lesstests.bench import Benchmark, BenchReport, BenchRun
 from lesstests.code_coverage import BenchCode, RecordingCode
 from lesstests.coverage import RestCov, SuiteCoverage
+from lesstests.fault_inventory import FaultInventory
 from lesstests.jacoco import JaCoCo
 from lesstests.merge_study import MergeFolder, MergeStudy, PlanStudy
 from lesstests.recording import RecordedTest, Recorder, Recording
@@ -396,6 +397,29 @@ class BenchCommand:
         print(report)
 
 
+class FaultsCommand:
+    """List the response faults received by recorded tests."""
+
+    name = "faults"
+    help = "list response fault families and count their receivers"
+
+    def add_arguments(self, parser: argparse.ArgumentParser) -> None:
+        """Declare the recording, output file and optional kept test ids."""
+        parser.add_argument("--recording", type=Path, required=True)
+        parser.add_argument("--out", type=Path, required=True, help="write the families to this JSON file")
+        parser.add_argument("--kept", type=Path, help="text file with one kept test id per line")
+
+    def run(self, args: argparse.Namespace) -> None:
+        """Save the inventory and print its counts."""
+        recording = Recording(args.recording)
+        meta = recording.meta()
+        api = ApiDescription.load(Path(meta["spec"]), meta.get("restcov_base_path"))
+        inventory = FaultInventory.build(recording, api)
+        kept = set(args.kept.read_text(encoding="utf-8").splitlines()) if args.kept else None
+        inventory.save(args.out)
+        print(json.dumps(inventory.report(kept), indent=2))
+
+
 COMMANDS: tuple[Command, ...] = (
     RecordCommand(),
     CoverageCommand(),
@@ -403,6 +427,7 @@ COMMANDS: tuple[Command, ...] = (
     MergeCommand(),
     PlanCommand(),
     BenchCommand(),
+    FaultsCommand(),
 )
 
 
