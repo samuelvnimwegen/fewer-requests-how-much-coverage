@@ -593,6 +593,8 @@ def test_named_filling_rule_uses_the_cover_when_it_fits(
     first = recording.records()[0]
     for name in ("e", "f", "g", "h"):
         recording.save(RecordedTest(JavaTest("suite.Api", name), Outcome.PASSED, 1, first.exchanges))
+    extra = Exchange(first.exchanges[0].request, HttpResponse(201, "", Headers(), Body(b'{"created":true}')))
+    recording.save(RecordedTest(JavaTest("suite.Api", "h"), Outcome.PASSED, 1, [*first.exchanges, extra]))
     cli.main(
         [
             "select",
@@ -602,7 +604,7 @@ def test_named_filling_rule_uses_the_cover_when_it_fits(
             "fake.py",
             "--budgets",
             "cover",
-            "75",
+            "62.5",
             "25",
             "--draws",
             "0",
@@ -617,5 +619,9 @@ def test_named_filling_rule_uses_the_cover_when_it_fits(
     floor, large, small = saved["versions"]
     assert len(floor["tests"]) == 4
     assert set(floor["tests"]) < set(large["tests"])
-    assert (large["kept"], large["lost"]["all"]) == (6, 0)
+    assert (large["kept"], large["lost"]["all"]) == (5, 0)
     assert small["kept"] == 2 and small["lost"]["all"] > 0
+    assert small["applied_rule"] == "fewest-requests" and small["floor_size"] == 4
+    assert "eligible pool cover needs 4 tests" in (folder / "report.md").read_text()
+    if rule in ("most-new-values", "most-different"):
+        assert set(large["tests"]) - set(floor["tests"]) == {"suite.Api.h"}

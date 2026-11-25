@@ -63,13 +63,7 @@ class CoverBudget:
     label = "cover"
     share: Literal["cover"] = "cover"
 
-    def pick(
-        self,
-        matrix: "CoverageMatrix",
-        coverage: SuiteCoverage,
-        requests: dict[JavaTest, int],
-        select: Callable[[int], list[JavaTest]] | None = None,
-    ) -> list[JavaTest]:
+    def pick(self, matrix: "CoverageMatrix", coverage: SuiteCoverage, requests: dict[JavaTest, int]) -> list[JavaTest]:
         """Cover the items the eligible tests can reach.
 
         Returns:

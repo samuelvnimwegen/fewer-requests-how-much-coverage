@@ -8,7 +8,7 @@ from typing import Any
 from lesstests.baselines import DEFAULT_BASELINES, Baseline
 from lesstests.code_coverage import RecordingCode
 from lesstests.coverage import CoverageSet, Criterion, RestCov, SuiteCoverage
-from lesstests.filling import FewestRequests, FillingRule, FillPool
+from lesstests.filling import FewestRequests, FillingRule, FillPool, FloorFill
 from lesstests.jacoco import CodeKept
 from lesstests.java import JavaTest, Outcome
 from lesstests.recording import Recording
@@ -26,6 +26,7 @@ class SmallerSuite:
     coverage: CoverageSet
     requests: int
     code: CodeKept | None = None
+    floor_size: int | None = None
 
     @property
     def name(self) -> str:
@@ -56,6 +57,11 @@ class SmallerSuite:
             "covered": {**self.coverage.counts(), "all": len(self.coverage)},
             "lost": self.lost(full),
             **({"code": self.code.to_dict()} if self.code else {}),
+            **(
+                {"floor_size": self.floor_size, "applied_rule": FewestRequests.name}
+                if self.floor_size is not None
+                else {}
+            ),
             "tests": [test.id for test in self.tests],
         }
 
@@ -119,8 +125,14 @@ class SelectionStudy:
         )
         suites: list[SmallerSuite] = []
         for budget in self._budgets:
-            selected = budget.pick(matrix, self._coverage, requests, rule.select)
-            suites.append(self._build("selected", selected, budget, 0, requests, out))
+            if isinstance(budget, Budget):
+                selected = budget.pick(matrix, self._coverage, requests, rule.select)
+            else:
+                selected = budget.pick(matrix, self._coverage, requests)
+            suite = self._build("selected", selected, budget, 0, requests, out)
+            if isinstance(budget, Budget) and isinstance(rule, FloorFill) and len(selected) < len(rule.floor):
+                suite = replace(suite, floor_size=len(rule.floor))
+            suites.append(suite)
             for draw in range(1, self._draws + 1):
                 seed = RandomSelector.seed_for(self._seed, budget, draw)
                 for baseline in self._baselines:
@@ -226,7 +238,10 @@ class StudyReport:
         ]
         for label, selected, baselines in self._by_budget():
             lost = [str(selected["lost"][key]) for key in keys] + [str(selected["requests"])]
-            lines.append(f"| {label} | {selected['kept']} | Selected | " + " | ".join(lost) + " |")
+            name = "Selected"
+            if "floor_size" in selected:
+                name += f" ({selected['applied_rule']}, eligible pool cover needs {selected['floor_size']} tests)"
+            lines.append(f"| {label} | {selected['kept']} | {name} | " + " | ".join(lost) + " |")
             for baseline, drawn in baselines.items():
                 name = self._baseline_label(baseline)
                 spread = [self._spread([version["lost"][key] for version in drawn]) for key in keys]
