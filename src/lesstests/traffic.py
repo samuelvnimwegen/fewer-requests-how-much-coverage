@@ -8,8 +8,9 @@ from collections import defaultdict
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from functools import cached_property
+from itertools import pairwise
 from typing import Any, Protocol, Self
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, parse_qsl, unquote, urlsplit
 
 from lesstests.api import ApiDescription
 from lesstests.coverage import CoverageSet, Criterion
@@ -25,10 +26,11 @@ class Request:
 
     _escape = str.maketrans({char: "\\" + char for char in ".[]\\"})
 
-    def __init__(self, exchange: Exchange, operation: str) -> None:
+    def __init__(self, exchange: Exchange, operation: str, path_values: tuple[tuple[str, str], ...] = ()) -> None:
         """Keep the exchange and its operation name."""
         self.exchange = exchange
         self.operation = operation
+        self.path_values = path_values
 
     @staticmethod
     def body(body: Body, headers: Headers) -> Any:
@@ -54,6 +56,16 @@ class Request:
         """
         request = self.exchange.request
         return list(self._leaves(self.body(request.body, request.headers), ""))
+
+    @cached_property
+    def response_fields(self) -> list[tuple[str, Any]]:
+        """Read the response with the same path rules as the request.
+
+        Returns:
+            Field paths and values.
+        """
+        response = self.exchange.response
+        return list(self._leaves(self.body(response.body, response.headers), ""))
 
     @classmethod
     def _leaves(cls, value: Any, path: str) -> Iterator[tuple[str, Any]]:
@@ -199,7 +211,91 @@ class Readbacks:
                             yield collection, key
 
 
-FAMILIES: dict[str, Family] = {"commands": Commands(), "modes": Modes(), "fields": Fields(), "readbacks": Readbacks()}
+class ParameterValues:
+    """Query values and values captured by path placeholders."""
+
+    def items(self, requests: list[Request]) -> Iterator[Item]:
+        """Read actual parameter values, including blank query values.
+
+        Yields:
+            Operation, location, name and value.
+        """
+        for request in requests:
+            query = urlsplit(request.exchange.request.target).query
+            for name, value in parse_qsl(query, keep_blank_values=True):
+                yield request.operation, "query", name, value
+            for name, value in request.path_values:
+                yield request.operation, "path", name, unquote(value)
+
+
+class RequestValues:
+    """Typed scalar values of request body fields."""
+
+    def items(self, requests: list[Request]) -> Iterator[Item]:
+        """Read values at request leaves.
+
+        Yields:
+            Operation, path and JSON value.
+        """
+        for request in requests:
+            for path, value in request.fields:
+                if isinstance(value, (bool, int, float, str)):
+                    yield request.operation, path, json.dumps(value)
+
+
+class ResponseFields:
+    """Response leaf paths per operation and status."""
+
+    def items(self, requests: list[Request]) -> Iterator[Item]:
+        """Read the fields present in each response.
+
+        Yields:
+            Operation, status and path.
+        """
+        for request in requests:
+            for path, _ in request.response_fields:
+                yield request.operation, str(request.exchange.response.status), path
+
+
+class ResponseValues:
+    """Short response values grouped by operation, status and field."""
+
+    def items(self, requests: list[Request]) -> Iterator[Item]:
+        """Read short scalar values before checking their suite wide counts.
+
+        Yields:
+            Operation, status, path and typed JSON value.
+        """
+        for request in requests:
+            for path, value in request.response_fields:
+                if isinstance(value, (bool, int, float, str)) and len(str(value)) < 64:
+                    yield request.operation, str(request.exchange.response.status), path, json.dumps(value)
+
+
+class OperationPairs:
+    """Consecutive operations within a test."""
+
+    def items(self, requests: list[Request]) -> Iterator[Item]:
+        """Read operations in recording order.
+
+        Yields:
+            Previous and current operation.
+        """
+        for previous, current in pairwise(requests):
+            yield previous.operation, current.operation
+
+
+FAMILIES: dict[str, Family] = {
+    "commands": Commands(),
+    "modes": Modes(),
+    "fields": Fields(),
+    "readbacks": Readbacks(),
+    "parameter_values": ParameterValues(),
+    "request_values": RequestValues(),
+    "response_fields": ResponseFields(),
+    "response_values": ResponseValues(),
+    "operation_pairs": OperationPairs(),
+}
 
 
 @dataclass(slots=True)
@@ -222,12 +318,12 @@ class TrafficCoverage:
         if not names:
             return cls({})
         paths = sorted((i.key for i in full.items if i.criterion == Criterion.PATH), key=lambda p: (p.count("{"), p))
-        patterns = [(re.compile(re.sub(r"\\\{[^}]+\\\}", "[^/]+", re.escape(path))), path) for path in paths]
+        patterns = [(re.compile(re.sub(r"\\\{[^}]+\\\}", "([^/]+)", re.escape(path))), path) for path in paths]
         operations = {
             (method.upper(), path)
             for method, _, path in (i.key.partition(" ") for i in full.items if i.criterion == Criterion.OPERATION)
         }
-        matched: dict[tuple[str, str], str] = {}
+        matched: dict[tuple[str, str], tuple[str, tuple[tuple[str, str], ...]]] = {}
         witnesses: dict[str, dict[Item, set[JavaTest]]] = {name: defaultdict(set) for name in names}
         for record in records:
             requests = []
@@ -235,16 +331,21 @@ class TrafficCoverage:
                 method = exchange.request.method
                 path = api.path_of(exchange.request.target).rstrip("/") or "/"
                 if (method, path) not in matched:
-                    fitting = [p for pattern, p in patterns if pattern.fullmatch(path)]
-                    own = [p for p in fitting if (method.upper(), p) in operations]
-                    matched[method, path] = next(iter(own or fitting), "<unmatched>")
-                requests.append(Request(exchange, f"{method} {matched[method, path]}"))
+                    fitting = [(p, m) for pattern, p in patterns if (m := pattern.fullmatch(path))]
+                    own = [entry for entry in fitting if (method.upper(), entry[0]) in operations]
+                    template, values = "<unmatched>", ()
+                    if fitting:
+                        template, match = (own or fitting)[0]
+                        values = tuple(zip(re.findall(r"\{([^}]+)\}", template), match.groups(), strict=True))
+                    matched[method, path] = (f"{method} {template}", values)
+                requests.append(Request(exchange, *matched[method, path]))
             for name in names:
                 for item in FAMILIES[name].items(requests):
                     witnesses[name][item].add(record.test)
-        if "modes" in witnesses:
-            modes = witnesses["modes"]
-            witnesses["modes"] = {item: modes[item] for item in Modes.bounded(modes)}
+        for name in ("modes", "response_values"):
+            if name in witnesses:
+                family = witnesses[name]
+                witnesses[name] = {item: family[item] for item in Modes.bounded(family)}
         return cls(witnesses)
 
     def counts(self, tests: list[JavaTest]) -> dict[str, int]:

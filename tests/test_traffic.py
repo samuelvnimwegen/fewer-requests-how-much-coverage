@@ -161,3 +161,36 @@ def test_a_rejected_update_keeps_the_readback_and_another_host_gives_none() -> N
     a = _record("a", on("a.example", create), on("a.example", rejected), on("a.example", read))
     b = _record("b", on("a.example", create), on("b.example", read))
     assert _traffic([a, b], "readbacks").witnesses == {"readbacks": {("/orders", "colour"): {a.test}}}
+
+
+def test_parameter_values_and_pairs_keep_locations_and_test_boundaries() -> None:
+    """Requirement: Parameter values keep their location and consecutive operations belong to one test."""
+    first = _exchange("GET", "/api/orders/a%20b?id=a+b&id=")
+    second = _exchange("PUT", "/api/orders/new")
+    a, b = _record("a", first, second), _record("b", second)
+    families = _traffic([a, b], "parameter_values", "operation_pairs").witnesses
+    op = "GET /orders/{id}"
+    assert families["parameter_values"] == {
+        (op, "query", "id", "a b"): {a.test},
+        (op, "query", "id", ""): {a.test},
+        (op, "path", "id", "a b"): {a.test},
+    }
+    assert families["operation_pairs"] == {(op, "PUT /orders/new"): {a.test}}
+
+
+def test_response_values_bound_short_scalars_within_each_status() -> None:
+    """Requirement: Only response fields with two through twelve short scalar values keep their values."""
+    rows = []
+    for i in range(13):
+        body = {"many": i, "edge": i % 12, "long": "a" * (63 + i), "rows": [{"v": True if i else 1}]}
+        rows.append(_record(str(i), _exchange("POST", "/api/orders/new", body, body)))
+    rows.append(_record("error", _exchange("POST", "/api/orders/new", result={"edge": 0}, status=400)))
+    families = _traffic(rows, "request_values", "response_fields", "response_values").witnesses
+    op = "POST /orders/new"
+    assert set(families["response_values"]) == {
+        *((op, "200", ".edge", str(i)) for i in range(12)),
+        (op, "200", ".rows[].v", "1"),
+        (op, "200", ".rows[].v", "true"),
+    }
+    assert families["response_fields"][op, "400", ".edge"] == {rows[-1].test}
+    assert families["request_values"][op, ".many", "12"] == {rows[12].test}
