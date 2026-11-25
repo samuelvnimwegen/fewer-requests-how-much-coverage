@@ -5,15 +5,18 @@ import statistics
 import time
 from abc import ABC, abstractmethod
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from decimal import Decimal
 from typing import Any
 
 import numpy as np
 from scipy.optimize import Bounds, LinearConstraint, milp
-from scipy.sparse import csr_array, eye, hstack
+from scipy.sparse import csr_array
 
 from lesstests.java import JavaTest
+from lesstests.selection import Budget, CoverageSelector, RandomSelector
+from lesstests.versions import VersionPlan
 
 
 @dataclass(slots=True)
@@ -22,11 +25,10 @@ class CeilingResult:
 
     tests: list[str]
     lines: int
-    bound: float
+    bound: int
     gap: float
     status: str
     seconds: float
-    item_kind: str = "lines"
 
 
 class LineMatrix:
@@ -56,7 +58,7 @@ class LineMatrix:
                 columns.append(bit.bit_length() - 1)
                 mask ^= bit
         incidence = csr_array((np.ones(len(rows)), (rows, columns)), shape=(len(patterns), len(self.tests)))
-        self.reach = LinearConstraint(hstack([-incidence, eye(len(patterns))], format="csr"), -np.inf, 0)
+        self.reach = CoverageSelector.reach_constraint(incidence)
 
     def count(self, indices: list[int]) -> int:
         """Count the distinct lines reached.
@@ -103,7 +105,13 @@ class CeilingProgram(ABC):
         self.line_count = np.r_[np.zeros(len(matrix.tests)), matrix.weights]
 
     def _solve(
-        self, objective: np.ndarray, constraint: LinearConstraint, fallback: list[int], natural_bound: int, start: float
+        self,
+        objective: np.ndarray,
+        constraint: LinearConstraint,
+        fallback: list[int],
+        natural_bound: int,
+        start: float,
+        feasible: Callable[[list[int]], bool],
     ) -> CeilingResult:
         """Keep the best known suite and a bound in the original objective units.
 
@@ -116,7 +124,7 @@ class CeilingProgram(ABC):
         size = len(self.matrix.tests)
         value = self._objective(fallback)
         chosen = fallback
-        bound = float(natural_bound)
+        bound = natural_bound
         status = "optimal by bound"
         if value != natural_bound:
             solved = milp(
@@ -131,16 +139,18 @@ class CeilingProgram(ABC):
             status = "optimal" if solved.status == 0 else "time limit"
             if solved.x is not None:
                 candidate = np.flatnonzero(solved.x[:size] > 0.5).tolist()
-                if self._objective(candidate) <= value:
+                if feasible(candidate) and self._objective(candidate) <= value:
                     chosen = candidate
             elif solved.status == 1:
                 status = "time limit without an incumbent"
             dual = solved.mip_dual_bound
             if dual is not None and math.isfinite(dual):
-                bound = max(bound, float(dual))
+                bound = max(bound, math.ceil(dual - 1e-6))
             value = self._objective(chosen)
-        if status == "optimal":
-            bound = float(value)
+            if bound == value and solved.status == 1:
+                status = "optimal by bound"
+            if status == "optimal" and value != bound:
+                status = "feasible fallback"
         gap = max(0.0, value - bound) / max(1, abs(value))
         return CeilingResult(
             [self.matrix.tests[i].id for i in sorted(chosen)],
@@ -180,7 +190,9 @@ class MostLines(CeilingProgram):
             raise ValueError("Every candidate must have the requested size")
         fallback = min(candidates, key=self._objective)
         constraint = LinearConstraint(self.test_count, size, size)
-        return self._solve(-self.line_count, constraint, fallback, -self.matrix.total, start)
+        return self._solve(
+            -self.line_count, constraint, fallback, -self.matrix.total, start, lambda ids: len(ids) == size
+        )
 
     def _objective(self, indices: list[int]) -> int:
         """Score the suite.
@@ -194,24 +206,24 @@ class MostLines(CeilingProgram):
 class FewestTests(CeilingProgram):
     """Minimise tests for a given share of the lines reached by the full recording."""
 
-    def select(self, share: float, full: int) -> CeilingResult:
+    def select(self, share: float) -> CeilingResult:
         """Round the target up to a whole line.
 
         Returns:
             The suite and a lower bound on its test count.
 
         Raises:
-            ValueError: If the share is invalid or the pool cannot reach the target.
+            ValueError: If the share is invalid.
         """
         start = time.monotonic()
         if not 0 < share <= 1:
             raise ValueError("The target share must be above zero and at most one")
-        target = math.ceil(Decimal(str(share)) * full)
-        if target > self.matrix.total:
-            raise ValueError(f"The pool reaches {self.matrix.total} lines but the target needs {target}")
+        target = math.ceil(Decimal(str(share)) * self.matrix.total)
         greedy = self.matrix.greedy(len(self.matrix.tests), target)
         constraint = LinearConstraint(self.line_count, target, np.inf)
-        return self._solve(self.test_count, constraint, greedy, int(target > 0), start)
+        return self._solve(
+            self.test_count, constraint, greedy, int(target > 0), start, lambda ids: self.matrix.count(ids) >= target
+        )
 
     def _objective(self, indices: list[int]) -> int:
         """Score the suite.
@@ -232,7 +244,7 @@ class CeilingStudy:
         self.indices = {test.id: i for i, test in enumerate(self.pool.tests)}
         self.seconds = seconds
 
-    def measure(self, study: dict[str, Any], shares: list[float]) -> None:
+    def measure(self, study: dict[str, Any], shares: list[float], plan: VersionPlan | None = None) -> None:
         """Add the white box results and the fraction of the gap Selected closes.
 
         Raises:
@@ -241,8 +253,7 @@ class CeilingStudy:
         if study["tests"] != len(self.full.tests) or study["pool"] != len(self.pool.tests):
             raise ValueError("The saved study and recording differ in size")
         fewest = FewestTests(self.full, self.seconds)
-        study["minimum_code_covers"] = {str(share): asdict(fewest.select(share, self.full.total)) for share in shares}
-        most = MostLines(self.pool, self.seconds)
+        study["minimum_code_covers"] = {str(share): asdict(fewest.select(share)) for share in shares}
         for selected in study["versions"]:
             if selected["version"] != "selected":
                 continue
@@ -253,11 +264,48 @@ class CeilingStudy:
             for suite, count in zip(suites, counts, strict=True):
                 if count != suite["code"]["kept"]["lines"] or self.full.total != suite["code"]["of"]["lines"]:
                     raise ValueError("The saved line counts differ from the recording")
-            ceiling = most.select(selected["kept"], indices)
-            selected["code_ceiling"] = asdict(ceiling)
-            random = statistics.mean(counts[1:]) if drawn else None
-            selected["gap_closed"] = (
-                (counts[0] - random) / (ceiling.lines - random)
-                if random is not None and ceiling.lines > random
-                else None
-            )
+            selected.update(self._compare(selected["kept"], indices, counts))
+        if plan is not None:
+            version = next((v for v in plan.versions if v.name == VersionPlan.SELECT), None)
+            if version is None or any(test.id not in self.indices for test in version.tests):
+                raise ValueError("The plan needs a Select suite from the eligible pool")
+            size = len(version.tests)
+            indices = [[self.indices[test.id] for test in version.tests]]
+            for draw in range(1, study["draws"] + 1):
+                if size:
+                    budget = Budget(size / len(self.pool.tests))
+                    selector = RandomSelector(RandomSelector.seed_for(study["seed"], budget, draw))
+                    sample = selector.draw(self.pool.tests, size)
+                    indices.append([self.indices[test.id] for test in sample])
+                else:
+                    indices.append([])
+            row = self._compare(size, indices, [self.pool.count(group) for group in indices])
+            if version.code and version.code.kept.lines != row["selected_lines"]:
+                raise ValueError("The plan line count differs from the recording")
+            study["plan_select"] = {"tests": [t.id for t in version.tests], **row}
+
+    def _compare(self, size: int, indices: list[list[int]], counts: list[int]) -> dict[str, Any]:
+        """Compare Selected and its Random draws at the same test count.
+
+        Returns:
+            Line counts, the ceiling and the fraction of the gap closed.
+        """
+        selected, *draws = counts
+        random = statistics.mean(draws) if draws else None
+        ceiling = MostLines(self.pool, self.seconds).select(size, indices)
+
+        def ratio(lines: int) -> float | None:
+            """Calculate the fraction of the gap closed.
+
+            Returns:
+                The ratio when the denominator is positive.
+            """
+            return (selected - random) / (lines - random) if random is not None and lines > random else None
+
+        return dict(
+            selected_lines=selected,
+            random_mean=random,
+            code_ceiling=asdict(ceiling),
+            gap_closed=ratio(ceiling.lines),
+            gap_closed_at_bound=ratio(ceiling.bound),
+        )

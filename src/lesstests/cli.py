@@ -122,8 +122,10 @@ class JaCoCoOption:
             raise SystemExit(str(error)) from error
 
     @classmethod
-    def recording_code(cls, args: argparse.Namespace, recording: Recording) -> RecordingCode | None:
-        """Build the code coverage of a recording made with `--code-coverage`, and check it against JaCoCo once.
+    def recording_code(
+        cls, args: argparse.Namespace, recording: Recording, *, check: bool = True
+    ) -> RecordingCode | None:
+        """Build the code coverage of a recording and optionally check it against JaCoCo.
 
         Returns:
             The code coverage, or None when the recording has none.
@@ -132,7 +134,7 @@ class JaCoCoOption:
             return None
         subject = SUBJECTS[recording.meta()["subject"]]
         code = RecordingCode.of(recording, cls.jacoco(args), subject.server_code)
-        if code is not None:
+        if check and code is not None:
             code.check()
         return code
 
@@ -296,7 +298,8 @@ class CodeCeilingCommand:
     def add_arguments(self, parser: argparse.ArgumentParser) -> None:
         """Declare the recording, solver limit and target shares."""
         parser.add_argument("--recording", required=True, type=Path)
-        parser.add_argument("--out", type=Path, help="output folder, defaults to the selection folder")
+        parser.add_argument("--out", type=Path, help="output folder, defaults to the code-ceiling folder")
+        parser.add_argument("--plan", type=Path, help="also compare the Select suite in this plan.json")
         parser.add_argument("--seconds", type=float, default=60, help="time limit for each program")
         parser.add_argument("--shares", type=float, nargs="+", default=[1.0], help="line shares for minimum covers")
         JaCoCoOption.add_argument(parser)
@@ -308,17 +311,18 @@ class CodeCeilingCommand:
             ValueError: If the recording has no server coverage.
         """
         recording = Recording(args.recording.resolve())
-        server = SUBJECTS[recording.meta()["subject"]].server_code
-        if not recording.has_code_coverage or server is None:
+
+        # Checking can write check.json into the source recording.
+        code = JaCoCoOption.recording_code(args, recording, check=False)
+        if code is None:
             raise ValueError("The code ceiling needs a recording with server code coverage")
-        code = RecordingCode([recording], JaCoCoOption.jacoco(args), server)
         folder = recording.folder / "selection"
         result = json.loads((folder / "selection.json").read_text(encoding="utf-8"))
         records = recording.records()
         pool = [r.test for r in records if not result["passing_only"] or r.outcome is Outcome.PASSED]
         study = CeilingStudy(code.lines([r.test for r in records]), pool, args.seconds)
-        study.measure(result, args.shares)
-        out = args.out or folder
+        study.measure(result, args.shares, VersionPlan.load(args.plan) if args.plan else None)
+        out = args.out or recording.folder / "code-ceiling"
         out.mkdir(parents=True, exist_ok=True)
         report = StudyReport(result)
         (out / "selection.json").write_text(json.dumps(result, indent=1), encoding="utf-8")

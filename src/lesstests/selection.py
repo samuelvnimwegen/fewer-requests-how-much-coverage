@@ -5,7 +5,7 @@ from typing import Protocol
 
 import numpy as np
 from scipy.optimize import Bounds, LinearConstraint, milp
-from scipy.sparse import csr_array, lil_array
+from scipy.sparse import csr_array, eye, hstack, lil_array
 
 from lesstests.coverage import CoverageItem, CoverageSet, SuiteCoverage
 from lesstests.java import JavaTest
@@ -82,7 +82,15 @@ class RandomSelector:
         Returns:
             The picked tests, sorted.
         """
-        return sorted(self._random.sample(matrix.tests, min(size, len(matrix.tests))))
+        return self.draw(matrix.tests, size)
+
+    def draw(self, pool: list[JavaTest], size: int) -> list[JavaTest]:
+        """Sample from the ordered pool.
+
+        Returns:
+            The picked tests, sorted.
+        """
+        return sorted(self._random.sample(pool, min(size, len(pool))))
 
     @staticmethod
     def seed_for(base: int, budget: Budget, draw: int) -> int:
@@ -144,14 +152,23 @@ class CoverageSelector:
             The two constraint blocks.
         """
         tests, items = len(matrix.tests), len(matrix.items)
-        reach = lil_array((items, tests + items))
+        reach = lil_array((items, tests))
         for test, reached in enumerate(matrix.reaches):
             for item in reached:
-                reach[item, test] = -1
-        for item in range(items):
-            reach[item, tests + item] = 1
+                reach[item, test] = 1
         count = np.concatenate([np.ones(tests), np.zeros(items)]).reshape(1, -1)
-        return [LinearConstraint(csr_array(reach), -np.inf, 0), LinearConstraint(count, size, size)]
+        return [CoverageSelector.reach_constraint(csr_array(reach)), LinearConstraint(count, size, size)]
+
+    @staticmethod
+    def reach_constraint(incidence: csr_array) -> LinearConstraint:
+        """Count an item only if a chosen test reaches it.
+
+        Returns:
+            One constraint per row of the item by test matrix.
+        """
+        assert incidence.shape is not None
+        rows = hstack([-incidence, eye(incidence.shape[0])], format="csr")
+        return LinearConstraint(rows, -np.inf, 0)
 
 
 class SmallestCover:

@@ -511,3 +511,34 @@ def test_every_command_on_a_recording_with_code_coverage_checks_the_helper_first
     args = cli.argparse.Namespace(jacoco=_jacoco_folder(tmp_path))
     assert cli.JaCoCoOption.recording_code(args, recording) is not None
     assert checked == [True]
+
+
+def test_the_ceiling_uses_only_passing_tests_and_preserves_the_saved_study(
+    tmp_path: Path, restcov: tuple[FakeRestCov, list[tuple[Path, Path]]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The default output keeps the saved study and its eligible pool."""
+    recording = _recording(tmp_path / "rec")
+    failed = JavaTest("suite.Api", "failed")
+    recording.save(RecordedTest(failed, Outcome.FAILED, 1.0))
+    args = ["--recording", str(recording.folder)]
+    cli.main(["select", *args, "--passing-only", "--restcov", "restcov.py", "--budgets", "25", "--draws", "1"])
+    path = recording.folder / "selection" / "selection.json"
+    saved = json.loads(path.read_text())
+    for row in saved["versions"]:
+        row["code"] = jacoco.CodeKept(jacoco.CodeCounts(1), jacoco.CodeCounts(3)).to_dict()
+    original = json.dumps(saved)
+    path.write_text(original)
+    recording.write_meta({"subject": "petstore", "code_coverage": True})
+    monkeypatch.setattr(cli.RecordingCode, "__init__", lambda self, recordings, jacoco, code: None)
+    monkeypatch.setattr(
+        cli.RecordingCode, "lines", lambda self, tests: {t: ({2, 3} if t == failed else {1}) for t in tests}
+    )
+    plan = tmp_path / "plan.json"
+    select = dict(name="Select", tests=["suite.Api.a", "suite.Api.b"], coverage=[], values=[], requests=2)
+    plan.write_text(json.dumps({"versions": [select]}))
+    cli.main(["code-ceiling", *args, "--plan", str(plan), "--jacoco", str(_jacoco_folder(tmp_path))])
+    result = json.loads((recording.folder / "code-ceiling" / "selection.json").read_text())
+    assert result["versions"][0]["code_ceiling"]["lines"] == 1
+    assert result["plan_select"]["random_mean"] == 1
+    assert len(result["plan_select"]["code_ceiling"]["tests"]) == 2
+    assert path.read_text() == original
