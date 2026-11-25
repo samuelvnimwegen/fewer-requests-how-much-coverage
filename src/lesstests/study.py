@@ -8,6 +8,7 @@ from typing import Any
 from lesstests.baselines import DEFAULT_BASELINES, Baseline
 from lesstests.code_coverage import RecordingCode
 from lesstests.coverage import CoverageSet, Criterion, RestCov, SuiteCoverage
+from lesstests.filling import FewestRequests, FillingRule, FillPool
 from lesstests.jacoco import CodeKept
 from lesstests.java import JavaTest, Outcome
 from lesstests.recording import Recording
@@ -77,6 +78,8 @@ class SelectionStudy:
         passing_only: bool = False,
         code: RecordingCode | None = None,
         baselines: Sequence[Baseline] = DEFAULT_BASELINES,
+        filling_rule: type[FillingRule] = FewestRequests,
+        base_path: str = "",
     ) -> None:
         """Set up the study. With `passing_only`, every suite uses tests that passed alone.
 
@@ -99,6 +102,8 @@ class SelectionStudy:
         self._seed = seed
         self._passing_only = passing_only
         self._code = code
+        self._filling_rule = filling_rule
+        self._base_path = base_path
         self._baselines = tuple(baselines)
 
     def run(self, out: Path) -> list[SmallerSuite]:
@@ -111,9 +116,12 @@ class SelectionStudy:
         requests = {record.test: record.requests for record in records}
         pool = [record.test for record in records if record.outcome is Outcome.PASSED or not self._passing_only]
         matrix = CoverageMatrix(self._coverage, requests, pool)
+        rule = self._filling_rule(
+            FillPool(matrix, self._coverage, requests, {r.test: r for r in records}, self._base_path, self._seed)
+        )
         suites: list[SmallerSuite] = []
         for budget in self._budgets:
-            selected = budget.pick(matrix, self._coverage, requests)
+            selected = budget.pick(matrix, self._coverage, requests, rule.select)
             suites.append(self._build("selected", selected, budget, 0, requests, out))
             for draw in range(1, self._draws + 1):
                 seed = RandomSelector.seed_for(self._seed, budget, draw)
@@ -161,6 +169,7 @@ class SelectionStudy:
             "pool": pool,
             "passing_only": self._passing_only,
             "seed": self._seed,
+            "filling_rule": self._filling_rule.name,
             "draws": self._draws,
             "totals": self._coverage.totals,
             "full": {**full.counts(), "all": len(full)},
@@ -210,6 +219,8 @@ class StudyReport:
             "loses against the full suite. Requests counts what the kept tests send. "
             f"Random shows the mean over {self._result['draws']} draws, with the lowest and highest draw. "
             "Length matched random keeps the same number of tests at each exact request count as Selected.",
+            "",
+            f"Selected filling rule: {self._result.get('filling_rule', 'fewest-requests')}.",
             "",
             "| Budget | Kept | Version | " + " | ".join(columns) + " |",
             "|---|---:|---|" + "---:|" * len(columns),

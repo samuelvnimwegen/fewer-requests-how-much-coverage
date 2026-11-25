@@ -112,6 +112,11 @@ class ApiDescription:
         prefixes = [*reader.server_paths(), *([base_path] if base_path else [])]
         return cls(reader.operations(), prefixes)
 
+    @property
+    def server_prefix(self) -> str:
+        """The first server path, used to group traffic when the recording has no extra base path."""
+        return self._prefixes[0] if self._prefixes else ""
+
     def path_of(self, target: str) -> str:
         """Strip the scheme, host, query and server prefixes the way RESTCov does.
 
