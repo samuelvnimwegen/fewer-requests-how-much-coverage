@@ -297,10 +297,6 @@ class SelectCommand(RecordingCommand):
         out = recording.folder / "selection"
         code = JaCoCoOption.recording_code(args, recording)
         rule = FILLING_RULES[args.filling_rule]
-        prefix = ""
-        if rule.uses_traffic:
-            meta = recording.meta()
-            prefix = meta.get("restcov_base_path") or ApiDescription.load(Path(meta["spec"])).server_prefix
         study = SelectionStudy(
             recording,
             coverage,
@@ -311,7 +307,6 @@ class SelectCommand(RecordingCommand):
             args.passing_only,
             code,
             filling_rule=rule,
-            base_path=prefix.rstrip("/"),
         )
         study.run(out)
         print((out / "report.md").read_text(encoding="utf-8"))

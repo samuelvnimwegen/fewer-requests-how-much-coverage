@@ -79,7 +79,6 @@ class SelectionStudy:
         code: RecordingCode | None = None,
         baselines: Sequence[Baseline] = DEFAULT_BASELINES,
         filling_rule: type[FillingRule] = FewestRequests,
-        base_path: str = "",
     ) -> None:
         """Set up the study. With `passing_only`, every suite uses tests that passed alone.
 
@@ -103,7 +102,6 @@ class SelectionStudy:
         self._passing_only = passing_only
         self._code = code
         self._filling_rule = filling_rule
-        self._base_path = base_path
         self._baselines = tuple(baselines)
 
     def run(self, out: Path) -> list[SmallerSuite]:
@@ -117,7 +115,7 @@ class SelectionStudy:
         pool = [record.test for record in records if record.outcome is Outcome.PASSED or not self._passing_only]
         matrix = CoverageMatrix(self._coverage, requests, pool)
         rule = self._filling_rule(
-            FillPool(matrix, self._coverage, requests, {r.test: r for r in records}, self._base_path, self._seed)
+            FillPool(matrix, self._coverage, requests, {r.test: r for r in records}, self._recording, self._seed)
         )
         suites: list[SmallerSuite] = []
         for budget in self._budgets:

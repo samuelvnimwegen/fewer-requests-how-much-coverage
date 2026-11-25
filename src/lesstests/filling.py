@@ -5,14 +5,16 @@ from collections import Counter, defaultdict
 from collections.abc import Iterator
 from dataclasses import dataclass
 from functools import cached_property
+from pathlib import Path
 
 import numpy as np
 from numpy.typing import NDArray
 from scipy.sparse import csr_matrix
 
+from lesstests.api import ApiDescription
 from lesstests.coverage import SuiteCoverage
 from lesstests.java import JavaTest
-from lesstests.recording import RecordedTest
+from lesstests.recording import RecordedTest, Recording
 from lesstests.selection import CoverageMatrix, CoverageSelector, CoverBudget
 from lesstests.traffic_values import FieldValues, Item, Traffic
 
@@ -25,7 +27,7 @@ class FillPool:
     coverage: SuiteCoverage
     requests: dict[JavaTest, int]
     records: dict[JavaTest, RecordedTest]
-    prefix: str
+    recording: Recording
     seed: int
 
 
@@ -33,7 +35,6 @@ class FillingRule(ABC):
     """Choose the tests at a percentage budget."""
 
     name: str
-    uses_traffic = False
 
     def __init__(self, pool: FillPool) -> None:
         """Keep the eligible pool."""
@@ -132,11 +133,21 @@ class CoverTwice(FloorFill):
         return additions
 
 
-class MostNewValues(FloorFill):
+class TrafficFill(FloorFill):
+    """Read the base path only when a traffic rule has places to fill."""
+
+    @cached_property
+    def prefix(self) -> str:
+        """The recorded base path or the first server path in the API description."""
+        meta = self.pool.recording.meta()
+        prefix = meta.get("restcov_base_path") or ApiDescription.load(Path(meta["spec"])).server_prefix
+        return prefix.rstrip("/")
+
+
+class MostNewValues(TrafficFill):
     """Prefer tests with unusual request values that the floor has not shown."""
 
     name = "most-new-values"
-    uses_traffic = True
 
     @cached_property
     def items(self) -> dict[JavaTest, set[Item]]:
@@ -148,7 +159,7 @@ class MostNewValues(FloorFill):
             found = items[index]
             for exchange in self.pool.records[test].exchanges:
                 request = exchange.request
-                op, query = Traffic.operation(request, self.pool.prefix)
+                op, query = Traffic.operation(request, self.prefix)
                 found.update([("operation", op), ("status", op, str(exchange.response.status))])
                 for source, values in (("query", query), ("body", Traffic.fields(request.body, request.headers))):
                     for path, value in values:
@@ -186,17 +197,21 @@ class MostNewValues(FloorFill):
         return additions
 
 
-class MostDifferent(FloorFill):
+class MostDifferent(TrafficFill):
     """Prefer traffic vectors with the greatest squared distance from the kept span."""
 
     name = "most-different"
-    uses_traffic = True
 
     def _tokens(self, record: RecordedTest) -> Iterator[Item]:
+        """Read one test in request order.
+
+        Yields:
+            The operation, sequence, request and response tokens.
+        """
         previous = ""
         for exchange in record.exchanges:
             req, res = exchange.request, exchange.response
-            op, query = Traffic.operation(req, self.pool.prefix)
+            op, query = Traffic.operation(req, self.prefix)
             yield ("operation", op)
             if previous:
                 yield ("sequence", previous, op)

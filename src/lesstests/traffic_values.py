@@ -66,6 +66,11 @@ class Traffic:
 
     @classmethod
     def _leaves(cls, value: object, path: str) -> Iterator[tuple[str, Scalar]]:
+        """Ignore array indices so repeated shapes reach the same field.
+
+        Yields:
+            Each leaf path and value.
+        """
         if isinstance(value, list):
             if not value:
                 yield path, "<EMPTY_LIST>"
