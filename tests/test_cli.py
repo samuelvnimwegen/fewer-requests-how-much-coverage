@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 from fake_restcov import FakeRestCov
+from test_jacoco import FakeJaCoCo
 
 from lesstests import cli, jacoco, subjects
 from lesstests.exchange import Body, Exchange, Headers, HttpRequest, HttpResponse
@@ -578,3 +579,33 @@ def test_rank_reports_empty_families_and_singletons_without_code(
     assert rows["operation_pairs", True]["novelty"] is None
     assert (out / "report.md").is_file()
     assert not (recording.folder / "coverage").exists()
+
+
+def test_rank_scores_code_per_test_of_each_cover(
+    tmp_path: Path, restcov: tuple[FakeRestCov, list[tuple[Path, Path]]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Requirement: Each cover reports the cost and code per test of its own selection."""
+    recording = Recording(tmp_path / "rec")
+    spec = tmp_path / "spec.json"
+    spec.write_text('{"paths": {}}')
+    recording.write_meta({"spec": str(spec)})
+    (recording.classes_folder / "classes").mkdir(parents=True)
+    for name, target, count in [("a", "/run?command=start", 1), ("b", "/other", 1), ("c", "/other", 2)]:
+        test = JavaTest("suite.Api", name)
+        exchange = Exchange(HttpRequest("GET", target, Headers(), Body()), HttpResponse(200, "OK", Headers(), Body()))
+        recording.save(RecordedTest(test, Outcome.PASSED, 1, [exchange] * count))
+        dump = recording.exec_of(test)
+        dump.parent.mkdir(exist_ok=True, parents=True)
+        dump.write_text(f"line:{name} line:shared branch:{name} method:{name}")
+    code = cli.RecordingCode([recording], FakeJaCoCo(tmp_path), jacoco.ServerCode("s", ("classes",), 8083))
+    monkeypatch.setattr(cli.JaCoCoOption, "recording_code", staticmethod(lambda *args: code))
+    out = tmp_path / "results"
+    cli.main(["rank", "--recording", str(recording.folder), "--restcov", "fake", "--out", str(out)])
+    result = json.loads((out / "ranking.json").read_text())
+    assert (result["full_tests"], result["full_requests"]) == (3, 4)
+    alone, combined = [row for row in result["covers"] if row["family"] == "commands"]
+    assert (alone["tests"], alone["requests"]) == (["suite.Api.a"], 1)
+    assert (combined["tests"], combined["requests"]) == (["suite.Api.a", "suite.Api.b"], 2)
+    assert alone["per_test"] == {"lines": 2, "branches": 1, "methods": 1}
+    assert combined["per_test"] == {"lines": 1.5, "branches": 1, "methods": 1}
+    assert "| commands | 1 | 1 (100.0%) |" in (out / "report.md").read_text()

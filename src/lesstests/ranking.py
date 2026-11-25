@@ -73,12 +73,13 @@ class FamilyCover:
         Returns:
             One row for the report.
         """
+        share = f"{self.singletons / self.items:.1%}" if self.items else "n/a"
         code = self.kept
         counts = [str(code.of(k)) if code else "n/a" for k in CodeCounts.KINDS]
         ratios = [f"{self.per_test[k]:.2f}" if self.per_test else "n/a" for k in CodeCounts.KINDS]
         novelty = "n/a" if self.novelty is None else f"{self.novelty[0]}/{self.novelty[1]}"
         return (
-            f"| {self.family} | {self.items} | {self.singletons} | {len(self.tests)} | {self.requests} | "
+            f"| {self.family} | {self.items} | {self.singletons} ({share}) | {len(self.tests)} | {self.requests} | "
             + " | ".join([*counts, *ratios, novelty])
             + " |"
         )
@@ -173,8 +174,8 @@ class RankingStudy:
                 "",
                 f"## {title}",
                 "",
-                "| Family | Items | Singletons | Tests | Requests | Lines | Branches | Methods | Lines/test | "
-                "Branches/test | Methods/test | Novelty |",
+                "| Family | Items | Singletons (share of items) | Tests | Requests | Lines | Branches | Methods | "
+                "Lines/test | Branches/test | Methods/test | Novelty |",
                 "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
                 *(cover.markdown() for cover in covers if cover.with_restcov == combined),
             ]
