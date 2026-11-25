@@ -277,6 +277,10 @@ def test_the_helper_agrees_with_jacocos_own_report(tmp_path: Path) -> None:
     counter = CodeCounter(jacoco, [jar], "demo/", None)
     both = counter.check([dumps["pos"], dumps["neg"]], tmp_path / "both" / "report.xml").covered
     alone = counter.check([dumps["pos"]], tmp_path / "alone" / "report.xml").covered
+    pos_files, neg_files = frozenset([dumps["pos"]]), frozenset([dumps["neg"]])
+    groups = counter.count({pos_files: False, neg_files: False}, list_lines=True)
+    assert len(groups[pos_files].lines) == alone.lines
+    assert len(groups[pos_files].lines | groups[neg_files].lines) == both.lines
     assert both.methods == 2
     assert alone.branches < both.branches
 
@@ -444,3 +448,10 @@ def test_an_idle_dump_of_another_build_stops_the_count(tmp_path: Path) -> None:
 def test_the_helper_declares_no_package() -> None:
     # Java 22's single file launch refuses a package that doesn't match the folder, and Java 21 never notices.
     assert not any(line.startswith("package ") for line in JaCoCo.HELPER.read_text(encoding="utf-8").splitlines())
+
+
+def test_the_counter_reads_line_ids_for_each_group(tmp_path: Path) -> None:
+    """Line ids belong to the group named on each row."""
+    out = tmp_path / "counts.tsv"
+    out.write_text("group\tg0\t2\t5\t0\t0\t0\t0\nlines\tg0\t3\t4\n")
+    assert CodeCounter._read(out)["g0"].lines == {3, 4}

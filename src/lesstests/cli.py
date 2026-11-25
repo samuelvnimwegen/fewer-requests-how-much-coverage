@@ -8,13 +8,15 @@ from typing import Any, Protocol
 
 from lesstests.api import ApiDescription
 from lesstests.bench import Benchmark, BenchReport, BenchRun
+from lesstests.code_ceiling import CeilingStudy
 from lesstests.code_coverage import BenchCode, RecordingCode
 from lesstests.coverage import RestCov, SuiteCoverage
 from lesstests.jacoco import JaCoCo
+from lesstests.java import Outcome
 from lesstests.merge_study import MergeFolder, MergeStudy, PlanStudy
 from lesstests.recording import RecordedTest, Recorder, Recording
 from lesstests.selection import Budget
-from lesstests.study import SelectionStudy
+from lesstests.study import SelectionStudy, StudyReport
 from lesstests.subjects import SUBJECTS, Runners, SuiteCatalog
 from lesstests.versions import VersionPlan
 
@@ -120,8 +122,10 @@ class JaCoCoOption:
             raise SystemExit(str(error)) from error
 
     @classmethod
-    def recording_code(cls, args: argparse.Namespace, recording: Recording) -> RecordingCode | None:
-        """Build the code coverage of a recording made with `--code-coverage`, and check it against JaCoCo once.
+    def recording_code(
+        cls, args: argparse.Namespace, recording: Recording, *, check: bool = True
+    ) -> RecordingCode | None:
+        """Build the code coverage of a recording and optionally check it against JaCoCo.
 
         Returns:
             The code coverage, or None when the recording has none.
@@ -130,7 +134,7 @@ class JaCoCoOption:
             return None
         subject = SUBJECTS[recording.meta()["subject"]]
         code = RecordingCode.of(recording, cls.jacoco(args), subject.server_code)
-        if code is not None:
+        if check and code is not None:
             code.check()
         return code
 
@@ -285,6 +289,48 @@ class SelectCommand(RecordingCommand):
         print((out / "report.md").read_text(encoding="utf-8"))
 
 
+class CodeCeilingCommand:
+    """Compare a saved selection study with a white box yardstick."""
+
+    name = "code-ceiling"
+    help = "measure the best server line coverage at each size in a saved selection study"
+
+    def add_arguments(self, parser: argparse.ArgumentParser) -> None:
+        """Declare the recording, solver limit and target shares."""
+        parser.add_argument("--recording", required=True, type=Path)
+        parser.add_argument("--out", type=Path, help="output folder, defaults to the code-ceiling folder")
+        parser.add_argument("--plan", type=Path, help="also compare the Select suite in this plan.json")
+        parser.add_argument("--seconds", type=float, default=60, help="time limit for each program")
+        parser.add_argument("--shares", type=float, nargs="+", default=[1.0], help="line shares for minimum covers")
+        JaCoCoOption.add_argument(parser)
+
+    def run(self, args: argparse.Namespace) -> None:
+        """Add the yardstick to the study report and save each suite and its solver bound.
+
+        Raises:
+            ValueError: If the recording has no server coverage.
+        """
+        recording = Recording(args.recording.resolve())
+
+        # Checking can write check.json into the source recording.
+        code = JaCoCoOption.recording_code(args, recording, check=False)
+        if code is None:
+            raise ValueError("The code ceiling needs a recording with server code coverage")
+        folder = recording.folder / "selection"
+        result = json.loads((folder / "selection.json").read_text(encoding="utf-8"))
+        records = recording.records()
+        pool = [r.test for r in records if not result["passing_only"] or r.outcome is Outcome.PASSED]
+        study = CeilingStudy(code.lines([r.test for r in records]), pool, args.seconds)
+        study.measure(result, args.shares, VersionPlan.load(args.plan) if args.plan else None)
+        out = args.out or recording.folder / "code-ceiling"
+        out.mkdir(parents=True, exist_ok=True)
+        report = StudyReport(result)
+        (out / "selection.json").write_text(json.dumps(result, indent=1), encoding="utf-8")
+        (out / "report.md").write_text(report.markdown(), encoding="utf-8")
+        (out / "code-lost.md").write_text(report.code_lost(), encoding="utf-8")
+        print(report.markdown())
+
+
 class MergeCommand(RecordingCommand):
     """Merges tests that hit the same operation and status, then plans the Select and Select + Merge versions."""
 
@@ -400,6 +446,7 @@ COMMANDS: tuple[Command, ...] = (
     RecordCommand(),
     CoverageCommand(),
     SelectCommand(),
+    CodeCeilingCommand(),
     MergeCommand(),
     PlanCommand(),
     BenchCommand(),

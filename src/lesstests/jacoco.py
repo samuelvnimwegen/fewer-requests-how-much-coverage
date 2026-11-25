@@ -437,6 +437,7 @@ class GroupCount:
     totals: CodeCounts
     methods: set[str] = field(default_factory=set)
     missing: set[str] = field(default_factory=set)
+    lines: set[int] = field(default_factory=set)
 
 
 @dataclass(frozen=True, slots=True)
@@ -509,8 +510,10 @@ class CodeCounter:
             result[pair.name] = CodeKept(both, base.covered, lost, gone)
         return result
 
-    def count(self, groups: dict[frozenset[Path], bool], masked: bool = True) -> dict[frozenset[Path], GroupCount]:
-        """Count groups of files. A group maps to whether its covered methods get listed too.
+    def count(
+        self, groups: dict[frozenset[Path], bool], masked: bool = True, list_lines: bool = False
+    ) -> dict[frozenset[Path], GroupCount]:
+        """Count groups of files. Each group flag lists methods. list_lines adds line ids shared across this call.
 
         Returns:
             The counts by group.
@@ -522,7 +525,7 @@ class CodeCounter:
             if masked and self._idle is not None:
                 lines.append(f"idle\t{self._idle}")
             for files, methods in groups.items():
-                lines.append(f"group\t{names[files]}\t{int(masked)}\t{int(methods)}")
+                lines.append(f"group\t{names[files]}\t{int(masked)}\t{int(methods)}\t{int(list_lines)}")
                 lines += [f"exec\t{path}" for path in sorted(files)]
             job.write_text("\n".join(lines) + "\n", encoding="utf-8")
             self._jacoco.count(job, out)
@@ -546,6 +549,8 @@ class CodeCounter:
             if parts[0] == "group":
                 numbers = [int(part) for part in parts[2:8]]
                 counts[parts[1]] = GroupCount(CodeCounts(*numbers[0::2]), CodeCounts(*numbers[1::2]))
+            elif parts[0] == "lines":
+                counts[parts[1]].lines.update(map(int, parts[2:]))
             elif parts[0] == "method":
                 counts[parts[1]].methods.add(parts[2])
             elif parts[0] == "missing":

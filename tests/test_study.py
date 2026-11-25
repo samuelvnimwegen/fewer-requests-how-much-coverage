@@ -179,3 +179,36 @@ def test_the_code_table_lists_the_largest_budget_first() -> None:
     lines = StudyReport(result).markdown().splitlines()
     rows = [line for line in lines if line.startswith(("| 75% | 1 | Selected | 90.0%", "| 25% | 1 | Selected | 50.0%"))]
     assert [row[:5] for row in rows] == ["| 75%", "| 25%"]
+
+
+@pytest.mark.parametrize(
+    ("gap", "endpoint", "label"), [(None, None, "n/a"), (0.5, 0.4, "40.0% to 50.0%"), (-0.5, -0.4, "-50.0% to -40.0%")]
+)
+def test_the_ceiling_report_shows_both_ends_of_an_unproven_gap(
+    gap: float | None, endpoint: float | None, label: str
+) -> None:
+    """Every code table row lines up with the header and shows the available proof."""
+    row = dict(budget=0.5, kept=1, requests=1, lost=_counts(), code=_code(40))
+    result = dict(
+        tests=2,
+        pool=2,
+        draws=1,
+        requests=2,
+        full=_counts(),
+        versions=[
+            dict(
+                row,
+                version="selected",
+                gap_closed=gap,
+                gap_closed_at_bound=endpoint,
+                code_ceiling=dict(status="time limit", lines=44, bound=46, gap=2 / 44),
+            ),
+            dict(row, version="random"),
+        ],
+        minimum_code_covers={"0.95": dict(tests=["C.a"], lines=95, bound=1, status="optimal")},
+    )
+    report = StudyReport(result).markdown()
+    table = report.split("## Server code kept per budget")[1].split("The ceiling picks")[0]
+    assert {line.count("|") for line in table.splitlines() if line.startswith("|")} == {12}
+    assert f"| 44 | {label} | time limit (upper bound 46, gap 4.5%) |" in table
+    assert "| 95% | 1 | 95 | optimal | 1 |" in report

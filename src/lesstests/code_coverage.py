@@ -100,6 +100,16 @@ class RecordingCode:
         pairs = [KeptPair(name, self.files(tests), base, name in listed) for name, tests in versions.items()]
         return self._counter.kept(pairs)
 
+    def lines(self, tests: list[JavaTest]) -> dict[JavaTest, set[int]]:
+        """Read covered source lines after masking idle probes.
+
+        Returns:
+            Line numbers shared across all tests in this call.
+        """
+        files = {test: frozenset([self.exec_of(test)]) for test in tests}
+        counts = self._counter.count(dict.fromkeys(files.values(), False), list_lines=True)
+        return {test: counts[group].lines for test, group in files.items()}
+
     def check(self) -> CodeCheck:
         """Check the helper against JaCoCo's own report on all dumps of the first recording.
 

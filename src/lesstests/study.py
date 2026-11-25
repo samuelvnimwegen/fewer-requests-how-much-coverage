@@ -233,6 +233,9 @@ class StudyReport:
         versions = self._result["versions"]
         reference = CodeKept.from_dict(versions[0]["code"]).reference
         full = [str(reference.of(kind)) for kind in CodeKept.KINDS]
+        yardstick = any("code_ceiling" in version for version in versions)
+        extra = " Ceiling lines | Gap closed | Solver |" if yardstick else ""
+        blanks = "  |  |  |" if yardstick else ""
         lines = [
             "## Server code kept per budget",
             "",
@@ -241,23 +244,78 @@ class StudyReport:
             "Classes lost counts the classes where Selected reaches none of the methods the full suite reached, and "
             "`code-lost.md` names them and every lost method.",
             "",
-            "| Budget | Kept | Version | Lines | Branches | Methods | Classes lost | Methods lost |",
-            "|---|---:|---|---:|---:|---:|---:|---:|",
-            f"| 100% | {self._result['tests']} | Full suite | " + " | ".join(full) + " |  |  |",
+            "| Budget | Kept | Version | Lines | Branches | Methods | Classes lost | Methods lost |" + extra,
+            "|---|---:|---|---:|---:|---:|---:|---:|" + ("---:|---:|---|" if yardstick else ""),
+            f"| 100% | {self._result['tests']} | Full suite | " + " | ".join(full) + " |  |  |" + blanks,
         ]
         for budget, selected, drawn in self._by_budget():
             label = Budget(budget).label
             code = CodeKept.from_dict(selected["code"])
             kept = [f"{code.share(kind):.1%}" for kind in CodeKept.KINDS]
             kept += [str(len(code.lost_classes)), str(len(code.lost_methods))]
+            if yardstick:
+                kept += self._ceiling_cells(selected)
             lines.append(f"| {label} | {selected['kept']} | Selected | " + " | ".join(kept) + " |")
             if drawn:
                 shares = [
                     [CodeKept.from_dict(version["code"]).share(kind) for version in drawn] for kind in CodeKept.KINDS
                 ]
                 spread = [self._share_spread(values) for values in shares]
-                lines.append(f"| {label} | {selected['kept']} | Random | " + " | ".join(spread) + " |  |  |")
+                lines.append(f"| {label} | {selected['kept']} | Random | " + " | ".join(spread) + " |  |  |" + blanks)
+        if yardstick:
+            lines += [
+                "",
+                "The ceiling picks on server lines. It is a white box yardstick and never part of the method. "
+                "Gap closed is `(Selected - Random) / (Ceiling - Random)`, using line counts and the Random mean. "
+                "At a time limit the range uses the best suite found and the whole line upper bound. "
+                "With no draws or no gap it is n/a. "
+                "The solver bounds, gaps, times and minimum covers are in selection.json.",
+            ]
+        if plan := self._result.get("plan_select"):
+            mean = plan["random_mean"]
+            cells = [str(len(plan["tests"])), str(plan["selected_lines"]), "n/a" if mean is None else f"{mean:.1f}"]
+            lines += [
+                "",
+                "## Select from the saved plan",
+                "",
+                "| Tests | Selected lines | Random mean | Ceiling lines | Gap closed | Solver |",
+                "|---:|---:|---:|---:|---:|---|",
+                "| " + " | ".join(cells + self._ceiling_cells(plan)) + " |",
+            ]
+        if covers := self._result.get("minimum_code_covers"):
+            lines += [
+                "",
+                "## Fewest tests for each line target",
+                "",
+                "| Target | Tests | Lines | Solver | Lower bound in tests |",
+                "|---:|---:|---:|---|---:|",
+            ]
+            for share, cover in covers.items():
+                lines.append(
+                    f"| {100 * float(share):g}% | {len(cover['tests'])} | {cover['lines']} | "
+                    f"{cover['status']} | {cover['bound']} |"
+                )
         return lines
+
+    @staticmethod
+    def _ceiling_cells(row: dict[str, Any]) -> list[str]:
+        """Format the feasible line count and the proof available.
+
+        Returns:
+            The ceiling, gap closed and solver cells.
+        """
+        ceiling = row["code_ceiling"]
+        gap = row["gap_closed"]
+        text = "n/a" if gap is None else f"{gap:.1%}"
+        status = ceiling["status"]
+        if status.startswith("time limit") or status == "feasible fallback":
+            status += f" (upper bound {ceiling['bound']:g}, gap {ceiling['gap']:.1%})"
+            endpoint = row["gap_closed_at_bound"]
+            if endpoint is not None and gap is not None:
+                text = f"{min(endpoint, gap):.1%} to {max(endpoint, gap):.1%}"
+            elif endpoint is not None:
+                text = f"n/a at incumbent, {endpoint:.1%} at bound"
+        return [str(ceiling["lines"]), text, status]
 
     def code_lost(self) -> str:
         """List the classes and methods each Selected version lost against the full suite.
