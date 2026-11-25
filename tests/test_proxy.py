@@ -11,6 +11,8 @@ from typing import Any
 
 import pytest
 
+from lesstests.api import ApiDescription, Operation
+from lesstests.faults import FaultFamily, ProxyFault
 from lesstests.proxy import Address, InterceptingProxy, RecordingProxy, _TunnelHandler
 from lesstests.tls import CertificateAuthority
 
@@ -104,6 +106,19 @@ def test_proxy_passes_requests_on_and_records_them(upstream: Address) -> None:
     ]
     assert exchanges[1].request.body.data == b'{"id": 1}'
     assert exchanges[1].response.headers.get("Content-Type") == "text/plain"
+
+
+def test_proxy_sends_armed_status_once(upstream: Address) -> None:
+    """Requirement: A client receives the armed fault once through the recording proxy."""
+    api = ApiDescription([Operation("GET", "/echo", frozenset())], [])
+    fault = ProxyFault(api, FaultFamily("GET /echo", None, 200, (), "status"))
+    with RecordingProxy(Address("127.0.0.1", 0), upstream, fault=fault) as proxy:
+        assert _call(proxy.port, "GET", "/echo") == (400, b"GET /echo ")
+        assert _call(proxy.port, "GET", "/echo") == (200, b"GET /echo ")
+        exchanges, errors = proxy.log.take()
+    assert not errors
+    assert [item.response.status for item in exchanges] == [400, 200]
+    assert fault.hit and fault.hit.exchange.response.status == 200
 
 
 def test_proxy_reads_chunked_request_bodies(upstream: Address) -> None:

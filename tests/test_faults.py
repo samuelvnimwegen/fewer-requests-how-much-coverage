@@ -2,19 +2,27 @@ import gzip
 import io
 import json
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from unittest.mock import Mock, patch
 
 import pytest
-from test_proxy import EchoHandler
 
 from lesstests.api import ApiDescription, Operation
 from lesstests.cli import main
 from lesstests.exchange import Body, Exchange, Headers, HttpRequest, HttpResponse
-from lesstests.faults import FaultFamily, ProxyFault
+from lesstests.faults import Edit, FaultFamily, ProxyFault, ResponseFaults
 from lesstests.java import JavaTest, Outcome
-from lesstests.proxy import Address, RecordingProxy, _ForwardingHandler, _LoggingServer
+from lesstests.proxy import (
+    Address,
+    ExchangeLog,
+    RecordingProxy,
+    Redactor,
+    _ForwardingHandler,
+    _LoggingServer,
+    _TunnelHandler,
+)
 from lesstests.recording import RecordedTest, Recording
 
 API = ApiDescription([Operation("GET", "/pets/{pet}", frozenset())], [])
@@ -38,15 +46,16 @@ def _exchange(
         (b"false", (), "wrong value.boolean", True),
         (b'{"a":2.5}', ("a",), "wrong value.number", {"a": 3.5}),
         (b'"changed"', (), "wrong value.string", "other"),
+        (b'{"id":"---"}', ("id",), "wrong id", {"id": "---1"}),
         (b'{"id":12}', ("id",), "wrong id", {"id": 13}),
         (b'{"petId":"A-001"}', ("petId",), "wrong id", {"petId": "A-000"}),
         (b'{"a.b":null}', ("a.b",), "missing field", {}),
-        (b"[[],[1],[2]]", (None,), "empty list", [[], [], [2]]),
+        (b"[[],[1],[2]]", (None,), "empty list", [[], [], []]),
         (b"[1]", (), "empty list", []),
     ],
 )
 def test_body_edit(data: bytes, path: tuple[str | None, ...], kind: str, expected: Any) -> None:
-    """Requirement: Each body edit changes the bytes and only its first eligible JSON location."""
+    """Requirement: Each body edit changes the bytes and every matching JSON location."""
     fault = ProxyFault(API, FaultFamily("GET /pets/{pet}", "get", 200, path, kind))
     exchange = _exchange(data)
     response = fault.apply(exchange)
@@ -62,6 +71,8 @@ def test_status_keeps_binary_body(original: int, changed: int) -> None:
     exchange = _exchange(b"\xff\x00", status=original)
     fault = ProxyFault(API, FaultFamily("GET /pets/{pet}", "get", original, (), "status"))
     response = fault.apply(exchange)
+    assert fault.hit and fault.hit.exchange is exchange
+    assert fault.hit.edits == (Edit((), str(original), str(changed)),)
     assert response.status == changed
     assert response.body is exchange.response.body
     assert response.headers is exchange.response.headers
@@ -118,7 +129,7 @@ def test_forwarded_bytes_and_headers() -> None:
     server.response.side_effect = lambda pair: _LoggingServer.response(server, pair)
     handler._proxy = server
     handler._keep.side_effect = lambda pair: _ForwardingHandler._keep(handler, pair)
-    for body in (b'{"a":2}', data):
+    for body in (b'{"a": 2}', data):
         handler.wfile = io.BytesIO()
         handler.send_header.reset_mock()
         _ForwardingHandler._forward(handler)
@@ -142,7 +153,8 @@ def test_saved_inventory_and_kept_report(tmp_path: Path, capsys: pytest.CaptureF
     spec.write_text(json.dumps({"openapi": "3.0.0", "paths": {"/pets/{pet}": {"get": {}}}}))
     recording.write_meta({"spec": str(spec)})
     kept = tmp_path / "kept.txt"
-    kept.write_text("suite.a\n")
+    recording.save(RecordedTest(JavaTest("suite", "empty"), Outcome.PASSED, 1.0, []))
+    kept.write_text("suite.a\n  \nsuite.empty\n")
     out = tmp_path / "families.json"
     main(["faults", "--recording", str(recording.folder), "--out", str(out), "--kept", str(kept)])
     report = json.loads(capsys.readouterr().out)
@@ -156,19 +168,70 @@ def test_saved_inventory_and_kept_report(tmp_path: Path, capsys: pytest.CaptureF
     row = next(row for row in rows if row["change"] == "wrong value.number")
     assert row["tests"] == ["suite.a", "suite.b"]
     assert row["path"] == [None, "x"]
-    assert json.loads(ProxyFault(API, FaultFamily.from_dict(row)).apply(first).body.data) == [{"x": 2}, {"x": 2}]
+    assert json.loads(ProxyFault(API, FaultFamily.from_dict(row)).apply(first).body.data) == [{"x": 2}, {"x": 3}]
+
+    kept.write_text("suite.a\nsuite.typo\n")
+    out.unlink()
+    with pytest.raises(ValueError, match="Unknown kept test ids: suite.typo"):
+        main(["faults", "--recording", str(recording.folder), "--out", str(out), "--kept", str(kept)])
+    assert not out.exists()
 
 
-def test_default_proxy_keeps_echo_response() -> None:
-    """Requirement: An unarmed proxy keeps the bytes and headers of the upstream response."""
-    echo = Mock(spec=EchoHandler)
-    echo.path = "/pets/42?command=get"
-    echo.command = "GET"
-    echo.headers = {}
-    echo.wfile = io.BytesIO()
-    EchoHandler.do_GET(echo)
-    headers = Headers(tuple(call.args for call in echo.send_header.call_args_list))
-    exchange = _exchange(echo.wfile.getvalue(), status=echo.send_response.call_args.args[0], headers=headers)
-    server = Mock(spec=_LoggingServer)
-    server.fault = None
-    assert _LoggingServer.response(server, exchange) is exchange.response
+@pytest.mark.parametrize("charset", ["utf-8", "utf-8-sig", "utf-16", "utf-16-be", "utf-32"])
+def test_folded_edit_keeps_surrounding_tokens(charset: str) -> None:
+    """Requirement: Edit all three matching fields and keep every other byte."""
+    text = ' [ {"a":1, "€":12000.000000}, {"a":2}, {"a":3} ]\r\n'
+    exchange = _exchange(text.encode(charset))
+    fault = ProxyFault(API, FaultFamily("GET /pets/{pet}", "get", 200, (None, "a"), "wrong value.number"))
+    expected = ' [ {"a":2, "€":12000.000000}, {"a":3}, {"a":4} ]\r\n'
+    assert fault.apply(exchange).body.data == expected.encode(charset)
+    assert fault.hit and fault.hit.exchange is exchange
+    assert fault.hit.edits == tuple(Edit((i, "a"), str(i + 1), str(i + 2)) for i in range(3))
+
+
+def test_remove_member_in_each_position() -> None:
+    """Requirement: Removing a member keeps its neighbours valid in every object."""
+    exchange = _exchange(b'[{"x":null, "a":1},{"b":2,"x":[],"c":3},{"d":4,"x":[2]}]')
+    fault = ProxyFault(API, FaultFamily("GET /pets/{pet}", "get", 200, (None, "x"), "missing field"))
+    assert fault.apply(exchange).body.data == b'[{ "a":1},{"b":2,"c":3},{"d":4}]'
+    assert fault.hit and fault.hit.edits == tuple(
+        Edit((i, "x"), original, None) for i, original in enumerate(("null", "[]", "[2]"))
+    )
+
+
+@pytest.mark.parametrize(
+    ("method", "body"), [("GET", b'{"a":1,"a":2}'), ("GET", b'{"a":3.14159265358979323846}'), ("HEAD", b'{"a":1}')]
+)
+def test_status_only(method: str, body: bytes) -> None:
+    """Requirement: HEAD, duplicate names and unrepresentable decimals expose only the status."""
+    exchange = _exchange(body)
+    exchange = replace(exchange, request=replace(exchange.request, method=method))
+    assert [family.change for family in ResponseFaults("operation", exchange).families()] == ["status"]
+
+
+def test_id_excludes_scalar_edit() -> None:
+    """Requirement: An identifier can receive an id edit and cannot receive a scalar edit."""
+    kinds = {f.change for f in ResponseFaults("operation", _exchange(b'{"id":"---"}')).families()}
+    assert kinds == {"status", "missing field", "wrong id"}
+
+
+def test_tunnel_skips_passthrough_and_redacts_edited_response() -> None:
+    """Requirement: Passthrough leaves the fault armed and the tunnel logs the redacted edit."""
+    handler = Mock(spec=_TunnelHandler)
+    fault = ProxyFault(API, FaultFamily("GET /pets/{pet}", "get", 200, (), "wrong value.number"))
+    handler._proxy.response.side_effect = fault.apply
+    handler._proxy.log = ExchangeLog()
+    handler._intercepting.passthrough = {"skip"}
+    handler._intercepting.redactor = Redactor(frozenset({"secret"}))
+    exchange = _exchange(b"1", headers=Headers((("secret", "private"),)))
+    handler._host = "skip"
+    assert _TunnelHandler._keep(handler, exchange) is exchange.response
+    assert not fault.applied
+    assert handler._proxy.log.take() == ([], [])
+    handler._host = "included"
+    response = _TunnelHandler._keep(handler, exchange)
+    assert response.headers.get("secret") == "private"
+    assert response.body.data == b"2"
+    logged = handler._proxy.log.take()[0][0].response
+    assert logged.body == response.body
+    assert logged.headers.get("secret") == "<redacted>"
