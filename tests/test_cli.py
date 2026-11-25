@@ -581,3 +581,47 @@ def test_percentage_budgets_keep_their_selected_and_random_tests(
     assert rows == [
         (share, kind, draw, [f"suite.Api.{name}" for name in names]) for share, kind, draw, names in expected
     ]
+
+
+@pytest.mark.parametrize("rule", ["random-fill", "cover-twice", "most-new-values", "most-different"])
+def test_named_filling_rule_uses_the_cover_when_it_fits(
+    tmp_path: Path, restcov: tuple[FakeRestCov, list[tuple[Path, Path]]], rule: str
+) -> None:
+    """Requirement: A named rule fills a feasible budget and honours a budget smaller than the cover."""
+    recording = _recording(tmp_path / "rec")
+    recording.write_meta({"spec": str(tmp_path / "spec.json"), "restcov_base_path": "/v2"})
+    first = recording.records()[0]
+    for name in ("e", "f", "g", "h"):
+        recording.save(RecordedTest(JavaTest("suite.Api", name), Outcome.PASSED, 1, first.exchanges))
+    extra = Exchange(first.exchanges[0].request, HttpResponse(201, "", Headers(), Body(b'{"created":true}')))
+    recording.save(RecordedTest(JavaTest("suite.Api", "h"), Outcome.PASSED, 1, [*first.exchanges, extra]))
+    cli.main(
+        [
+            "select",
+            "--recording",
+            str(recording.folder),
+            "--restcov",
+            "fake.py",
+            "--budgets",
+            "cover",
+            "62.5",
+            "25",
+            "--draws",
+            "0",
+            "--filling-rule",
+            rule,
+        ]
+    )
+    folder = recording.folder / "selection"
+    saved = json.loads((folder / "selection.json").read_text())
+    assert saved["filling_rule"] == rule
+    assert rule in (folder / "report.md").read_text()
+    floor, large, small = saved["versions"]
+    assert len(floor["tests"]) == 4
+    assert set(floor["tests"]) < set(large["tests"])
+    assert (large["kept"], large["lost"]["all"]) == (5, 0)
+    assert small["kept"] == 2 and small["lost"]["all"] > 0
+    assert small["applied_rule"] == "fewest-requests" and small["floor_size"] == 4
+    assert "eligible pool cover needs 4 tests" in (folder / "report.md").read_text()
+    if rule in ("most-new-values", "most-different"):
+        assert set(large["tests"]) - set(floor["tests"]) == {"suite.Api.h"}

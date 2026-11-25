@@ -6,6 +6,7 @@ from fake_restcov import FakeRestCov
 from lesstests.baselines import UniformRandom
 from lesstests.coverage import CoverageItem, CoverageSet, Criterion, SuiteCoverage
 from lesstests.exchange import Body, Exchange, Headers, HttpRequest, HttpResponse
+from lesstests.filling import MostDifferent
 from lesstests.jacoco import CodeCounts, CodeKept
 from lesstests.java import JavaTest, Outcome
 from lesstests.recording import RecordedTest, Recording
@@ -56,10 +57,13 @@ def test_passing_only_sizes_budgets_from_the_pool(tmp_path: Path) -> None:
         recording.save(RecordedTest(JavaTest("suite.Api", name), outcome, 1.0, [exchange]))
     restcov = FakeRestCov()
     coverage = SuiteCoverage.measure(recording, restcov, tmp_path / "coverage")
-    study = SelectionStudy(recording, coverage, restcov, [Budget(0.5)], draws=2, seed=1, passing_only=True)
+    study = SelectionStudy(
+        recording, coverage, restcov, [Budget(0.5)], draws=2, seed=1, passing_only=True, filling_rule=MostDifferent
+    )
 
     # Half of the 2 passing tests is 1. Sizing from all 4 records would keep the whole pool.
     suites = study.run(tmp_path / "selection")
+    assert suites[0].floor_size == 2 and suites[0].lost(coverage.full)["all"] == 3
     assert [len(suite.tests) for suite in suites] == [1] * 5
     assert all(test.method.startswith("p") for suite in suites for test in suite.tests)
 

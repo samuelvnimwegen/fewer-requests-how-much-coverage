@@ -1,5 +1,6 @@
 import math
 import random
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal
 
@@ -26,13 +27,20 @@ class Budget:
         if not 0 < self.share <= 1:
             raise ValueError(f"A budget keeps more than 0% and at most 100% of the tests, not {self.share * 100}%")
 
-    def pick(self, matrix: "CoverageMatrix", coverage: SuiteCoverage, requests: dict[JavaTest, int]) -> list[JavaTest]:
+    def pick(
+        self,
+        matrix: "CoverageMatrix",
+        coverage: SuiteCoverage,
+        requests: dict[JavaTest, int],
+        select: Callable[[int], list[JavaTest]] | None = None,
+    ) -> list[JavaTest]:
         """Pick the suite at this share of the eligible pool.
 
         Returns:
             The Selected tests.
         """
-        return CoverageSelector().select(matrix, self.size(len(matrix.tests)))
+        size = self.size(len(matrix.tests))
+        return select(size) if select else CoverageSelector().select(matrix, size)
 
     def size(self, tests: int) -> int:
         """Turn the share into a number of tests, rounding halves up and keeping at least one.

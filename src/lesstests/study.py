@@ -8,6 +8,7 @@ from typing import Any
 from lesstests.baselines import DEFAULT_BASELINES, Baseline
 from lesstests.code_coverage import RecordingCode
 from lesstests.coverage import CoverageSet, Criterion, RestCov, SuiteCoverage
+from lesstests.filling import FewestRequests, FillingRule, FillPool, FloorFill
 from lesstests.jacoco import CodeKept
 from lesstests.java import JavaTest, Outcome
 from lesstests.recording import Recording
@@ -25,6 +26,7 @@ class SmallerSuite:
     coverage: CoverageSet
     requests: int
     code: CodeKept | None = None
+    floor_size: int | None = None
 
     @property
     def name(self) -> str:
@@ -55,6 +57,11 @@ class SmallerSuite:
             "covered": {**self.coverage.counts(), "all": len(self.coverage)},
             "lost": self.lost(full),
             **({"code": self.code.to_dict()} if self.code else {}),
+            **(
+                {"floor_size": self.floor_size, "applied_rule": FewestRequests.name}
+                if self.floor_size is not None
+                else {}
+            ),
             "tests": [test.id for test in self.tests],
         }
 
@@ -77,6 +84,7 @@ class SelectionStudy:
         passing_only: bool = False,
         code: RecordingCode | None = None,
         baselines: Sequence[Baseline] = DEFAULT_BASELINES,
+        filling_rule: type[FillingRule] = FewestRequests,
     ) -> None:
         """Set up the study. With `passing_only`, every suite uses tests that passed alone.
 
@@ -99,6 +107,7 @@ class SelectionStudy:
         self._seed = seed
         self._passing_only = passing_only
         self._code = code
+        self._filling_rule = filling_rule
         self._baselines = tuple(baselines)
 
     def run(self, out: Path) -> list[SmallerSuite]:
@@ -111,10 +120,19 @@ class SelectionStudy:
         requests = {record.test: record.requests for record in records}
         pool = [record.test for record in records if record.outcome is Outcome.PASSED or not self._passing_only]
         matrix = CoverageMatrix(self._coverage, requests, pool)
+        rule = self._filling_rule(
+            FillPool(matrix, self._coverage, requests, {r.test: r for r in records}, self._recording, self._seed)
+        )
         suites: list[SmallerSuite] = []
         for budget in self._budgets:
-            selected = budget.pick(matrix, self._coverage, requests)
-            suites.append(self._build("selected", selected, budget, 0, requests, out))
+            if isinstance(budget, Budget):
+                selected = budget.pick(matrix, self._coverage, requests, rule.select)
+            else:
+                selected = budget.pick(matrix, self._coverage, requests)
+            suite = self._build("selected", selected, budget, 0, requests, out)
+            if isinstance(budget, Budget) and isinstance(rule, FloorFill) and len(selected) < len(rule.floor):
+                suite = replace(suite, floor_size=len(rule.floor))
+            suites.append(suite)
             for draw in range(1, self._draws + 1):
                 seed = RandomSelector.seed_for(self._seed, budget, draw)
                 for baseline in self._baselines:
@@ -161,6 +179,7 @@ class SelectionStudy:
             "pool": pool,
             "passing_only": self._passing_only,
             "seed": self._seed,
+            "filling_rule": self._filling_rule.name,
             "draws": self._draws,
             "totals": self._coverage.totals,
             "full": {**full.counts(), "all": len(full)},
@@ -211,13 +230,18 @@ class StudyReport:
             f"Random shows the mean over {self._result['draws']} draws, with the lowest and highest draw. "
             "Length matched random keeps the same number of tests at each exact request count as Selected.",
             "",
+            f"Selected filling rule: {self._result.get('filling_rule', 'fewest-requests')}.",
+            "",
             "| Budget | Kept | Version | " + " | ".join(columns) + " |",
             "|---|---:|---|" + "---:|" * len(columns),
             f"| 100% | {self._result['tests']} | Full suite | " + " | ".join(full) + " |",
         ]
         for label, selected, baselines in self._by_budget():
             lost = [str(selected["lost"][key]) for key in keys] + [str(selected["requests"])]
-            lines.append(f"| {label} | {selected['kept']} | Selected | " + " | ".join(lost) + " |")
+            name = "Selected"
+            if "floor_size" in selected:
+                name += f" ({selected['applied_rule']}, eligible pool cover needs {selected['floor_size']} tests)"
+            lines.append(f"| {label} | {selected['kept']} | {name} | " + " | ".join(lost) + " |")
             for baseline, drawn in baselines.items():
                 name = self._baseline_label(baseline)
                 spread = [self._spread([version["lost"][key] for version in drawn]) for key in keys]
