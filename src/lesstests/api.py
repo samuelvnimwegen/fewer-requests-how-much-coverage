@@ -106,16 +106,31 @@ class ApiDescription:
         Returns:
             The description.
         """
-        text = path.read_text(encoding="utf-8")
-        document = json.loads(text) if path.suffix == ".json" else yaml.safe_load(text)
+        document = cls._document(path)
         reader = _DocumentReader(document)
         prefixes = [*reader.server_paths(), *([base_path] if base_path else [])]
         return cls(reader.operations(), prefixes)
 
-    @property
-    def server_prefix(self) -> str:
-        """The first server path, used to group traffic when the recording has no extra base path."""
-        return self._prefixes[0] if self._prefixes else ""
+    @staticmethod
+    def _document(path: Path) -> dict[str, Any]:
+        """Read JSON or YAML.
+
+        Returns:
+            The parsed API document.
+        """
+        text = path.read_text(encoding="utf-8")
+        return json.loads(text) if path.suffix == ".json" else yaml.safe_load(text)
+
+    @classmethod
+    def server_prefix(cls, path: Path) -> str:
+        """Read the path used to group traffic.
+
+        Returns:
+            The Swagger base path or first server path, empty for a root server.
+        """
+        document = cls._document(path)
+        server = next(iter(document.get("servers") or []), {})
+        return document.get("basePath") or urlsplit(server.get("url", "")).path
 
     def path_of(self, target: str) -> str:
         """Strip the scheme, host, query and server prefixes the way RESTCov does.

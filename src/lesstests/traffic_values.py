@@ -18,10 +18,10 @@ type Item = tuple[str, ...]
 class Traffic:
     """Read fields and recognise changing values without knowing the API's parameter names."""
 
-    integer = re.compile(r"-?\d+")
-    decimal = re.compile(r"-?\d+\.\d+")
-    uuid = re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", re.I)
-    mixed = re.compile(r"(?=.*[A-Za-z])(?=.*\d)[A-Za-z0-9_-]{6,}")
+    integer = re.compile(r"-?\d+$")
+    decimal = re.compile(r"-?\d+\.\d+$")
+    uuid = re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$", re.I)
+    mixed = re.compile(r"(?=.*[A-Za-z])(?=.*\d)[A-Za-z0-9_-]{6,}$")
     date = re.compile(
         r"\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?Z?)?"
         r"|(?i:\b\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{4}\b)",
@@ -37,15 +37,15 @@ class Traffic:
         url = urlsplit(request.target)
         parts = []
         for part in unquote(url.path).removeprefix(prefix).split("/"):
-            if cls.integer.fullmatch(part):
+            if cls.integer.match(part):
                 part = "{id}"
-            elif cls.uuid.fullmatch(part):
+            elif cls.uuid.match(part):
                 part = "{uuid}"
-            elif len(part) >= 10 and cls.mixed.fullmatch(part):
+            elif len(part) >= 10 and cls.mixed.match(part):
                 part = "{tok}"
             if part:
                 parts.append(part)
-        return f"{request.method} /{'/'.join(parts)}", parse_qsl(url.query, keep_blank_values=True)
+        return f"{request.method} /{'/'.join(parts)}", sorted(parse_qsl(url.query, keep_blank_values=True))
 
     @classmethod
     def fields(cls, body: Body, headers: Headers) -> Iterator[tuple[str, Scalar]]:
@@ -174,7 +174,7 @@ class FieldValues:
         compare_lengths = len(lengths) >= 5 and len(set(lengths)) >= 3
         for value, tests in self.strings.items():
             if len(value) <= 48 and not (
-                Traffic.uuid.fullmatch(value) or Traffic.mixed.fullmatch(value) or Traffic.date.search(value)
+                Traffic.uuid.match(value) or Traffic.mixed.match(value) or Traffic.date.search(value)
             ):
                 modes["string", value] = tests
             if compare_lengths:
