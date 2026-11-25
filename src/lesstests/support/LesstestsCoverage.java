@@ -38,7 +38,7 @@ import org.jacoco.cli.internal.core.tools.ExecFileLoader;
  * gets a "nomatch" line, even when another dump of the group ran the same file, and a class that ran without any
  * file gets a "missing" line, leaving out the classes Spring and Hibernate make at runtime. An empty exec file
  * stops the count, since a dump always holds a header. An idle file of another build stops it too, since the mask
- * matches classes by id.
+ * matches classes by id. A group asked for its lines gets one "lines" row with ids shared within this run.
  */
 public final class LesstestsCoverage {
 
@@ -296,7 +296,7 @@ public final class LesstestsCoverage {
     private record Group(String name, boolean masked, boolean methods, boolean lines, List<Path> files) {
     }
 
-    /** A job file: "classes PATH", "package PREFIX", "idle PATH", "group NAME MASKED METHODS" then "exec PATH". */
+    /** A job file: "classes PATH", "package PREFIX", "idle PATH", "group NAME MASKED METHODS LINES" then "exec PATH". */
     private record Job(List<Path> locations, String prefix, Path idle, List<Group> groups) {
 
         static Job read(Path path) throws IOException {

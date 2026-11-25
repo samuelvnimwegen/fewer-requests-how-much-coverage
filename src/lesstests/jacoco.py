@@ -513,7 +513,7 @@ class CodeCounter:
     def count(
         self, groups: dict[frozenset[Path], bool], masked: bool = True, list_lines: bool = False
     ) -> dict[frozenset[Path], GroupCount]:
-        """Count groups of files. A group maps to whether its covered methods get listed too.
+        """Count groups of files. Each group flag lists methods. list_lines adds line ids shared across this call.
 
         Returns:
             The counts by group.
