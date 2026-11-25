@@ -6,11 +6,12 @@ from pathlib import Path
 from typing import Any, Self
 
 from lesstests.api import ApiDescription, ValueItem
+from lesstests.budget import BudgetAnalysis
 from lesstests.coverage import CoverageSet, SuiteCoverage
 from lesstests.jacoco import CodeKept
 from lesstests.java import JavaTest, Outcome
 from lesstests.recording import RecordedTest
-from lesstests.selection import CoverOptions, SmallestCover
+from lesstests.selection import Budget, CoverageMatrix, CoverageSelector, CoverOptions, SmallestCover
 from lesstests.traffic import TrafficCoverage
 
 
@@ -74,6 +75,7 @@ class VersionPlan:
         """Keep the versions, the original first."""
         self.versions = versions
         self.options = options
+        self.budget_warning: dict[str, Any] | None = None
 
     @property
     def original(self) -> SuiteVersion:
@@ -92,6 +94,8 @@ class VersionPlan:
         Returns:
             The minimum cover settings when the user chose that mode.
         """
+        if self.budget_warning is not None:
+            return {"budget_warning": self.budget_warning}
         if self.options is None:
             return {}
         return {
@@ -108,7 +112,9 @@ class VersionPlan:
         raw = json.loads(path.read_text(encoding="utf-8"))
         settings = raw.get("selection")
         options = CoverOptions(tuple(settings["families"]), settings["share"]) if settings else None
-        return cls([SuiteVersion.from_dict(version) for version in raw["versions"]], options)
+        plan = cls([SuiteVersion.from_dict(version) for version in raw["versions"]], options)
+        plan.budget_warning = raw.get("budget_warning")
+        return plan
 
     def markdown(self) -> str:
         """Write what the recordings predict for each version, before any benchmark run.
@@ -148,6 +154,8 @@ class VersionPlan:
                     full_count = (self.original.traffic or {})[family]
                     kept_count = (self.versions[1].traffic or {})[family]
                     lines.append(f"| {family} | {full_count} | {kept_count} |")
+        if self.budget_warning is not None:
+            lines += ["", self.budget_warning["report"]]
         return "\n".join(lines) + "\n"
 
 
@@ -180,7 +188,9 @@ class VersionPlanner:
         self._api = api
         self._original_coverage, self._original_records = original
 
-    def plan(self, options: CoverOptions | None = None, passing_only: bool = False) -> VersionPlan:
+    def plan(
+        self, options: CoverOptions | None = None, passing_only: bool = False, budget: Budget | None = None
+    ) -> VersionPlan:
         """Pick the tests of Original and Select, for a suite without a Merge step.
 
         Returns:
@@ -198,15 +208,26 @@ class VersionPlanner:
             traffic = TrafficCoverage.collect(
                 self._original_records, self._api, self._original_coverage.full, options.families
             )
-        select = SmallestCover().select(
-            candidates, self._requests(records), self._original_coverage.full, traffic, options.share if options else 1
-        )
+        requests = self._requests(records)
+        warning = None
+        if budget is None:
+            select = SmallestCover().select(
+                candidates, requests, self._original_coverage.full, traffic, options.share if options else 1
+            )
+        else:
+            pool = list(candidates)
+            matrix = CoverageMatrix(self._original_coverage, requests, pool)
+            select = CoverageSelector().select(matrix, budget.size(len(pool)))
+            warning = BudgetAnalysis(self._original_coverage, pool, traffic).measure(select)
         original = self._version(VersionPlan.ORIGINAL, sorted(records), coverage, records)
         selected = self._version(VersionPlan.SELECT, select, coverage, records)
         if traffic is not None:
             original.traffic = traffic.counts(original.tests)
             selected.traffic = traffic.counts(select)
-        return VersionPlan([original, selected], options)
+        plan = VersionPlan([original, selected], options if budget is None else None)
+        if warning is not None:
+            plan.budget_warning = warning.to_dict()
+        return plan
 
     def plan_with_merge(self, merged: tuple[SuiteCoverage, list[RecordedTest]] | None) -> VersionPlan:
         """Add Select + Merge, which may also pick the kept merged copies. With none kept it equals Select.

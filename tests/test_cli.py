@@ -558,3 +558,32 @@ def test_invalid_traffic_options_fail_before_reading_the_recording(options: list
     for command in [["select"], ["plan", "--out", "unused"]]:
         with pytest.raises(SystemExit, match="Unknown traffic families|Traffic share must be"):
             cli.main([*command, "--recording", "missing", *options])
+
+
+def test_budget_commands_report_the_same_pick_and_limits(
+    tmp_path: Path, restcov: tuple[FakeRestCov, list[tuple[Path, Path]]], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Requirement: Plan and select print and save the same budget limits and actual losses."""
+    recording = _recording(tmp_path / "rec")
+    (recording.folder / "spec.json").write_text(json.dumps({"paths": {}}))
+    common = ["--recording", str(recording.folder), "--restcov", "fake", "--traffic", "fields"]
+    cli.main(["select", *common, "--budgets", "50", "--draws", "0"])
+    selection = recording.folder / "selection"
+    selected = json.loads((selection / "selection.json").read_text())["versions"][0]
+    warning = selected["budget_warning"]
+    assert warning["report"] in capsys.readouterr().out
+    assert warning["report"] in (selection / "report.md").read_text()
+    out = tmp_path / "plan"
+    cli.main(["plan", *common, "--budget", "50", "--out", str(out)])
+    raw = json.loads((out / "plan.json").read_text())
+    assert raw["versions"][1]["tests"] == selected["tests"]
+    assert raw["budget_warning"] == warning
+    assert warning["report"] in capsys.readouterr().out
+    assert warning["report"] in cli.VersionPlan.load(out / "plan.json").markdown()
+    assert warning["kinds"]["paths"] == {
+        "total": 4,
+        "most": {"value": 2, "qualifier": ""},
+        "minimum": {"value": 4, "qualifier": ""},
+    }
+    assert len(warning["lost"]["paths"]) == 2
+    assert "fields" in warning["lost"]

@@ -5,12 +5,14 @@ from pathlib import Path
 from typing import Any
 
 from lesstests.api import ApiDescription
+from lesstests.budget import BudgetAnalysis, BudgetWarning
 from lesstests.code_coverage import RecordingCode
 from lesstests.coverage import CoverageSet, Criterion, RestCov, SuiteCoverage
 from lesstests.jacoco import CodeKept
 from lesstests.java import JavaTest, Outcome
 from lesstests.recording import Recording
 from lesstests.selection import Budget, CoverageMatrix, CoverageSelector, CoverOptions, RandomSelector, Selector
+from lesstests.traffic import TrafficCoverage
 from lesstests.versions import VersionPlanner
 
 
@@ -25,6 +27,8 @@ class SmallerSuite:
     coverage: CoverageSet
     requests: int
     code: CodeKept | None = None
+
+    warning: BudgetWarning | None = None
 
     @property
     def name(self) -> str:
@@ -55,6 +59,7 @@ class SmallerSuite:
             "covered": {**self.coverage.counts(), "all": len(self.coverage)},
             "lost": self.lost(full),
             **({"code": self.code.to_dict()} if self.code else {}),
+            **({"budget_warning": self.warning.to_dict()} if self.warning else {}),
             "tests": [test.id for test in self.tests],
         }
 
@@ -76,6 +81,7 @@ class SelectionStudy:
         seed: int,
         passing_only: bool = False,
         code: RecordingCode | None = None,
+        families: tuple[str, ...] = (),
     ) -> None:
         """Set up the study. With `passing_only`, both selectors pick only from tests that passed alone.
 
@@ -90,6 +96,7 @@ class SelectionStudy:
         self._recording = recording
         self._coverage = coverage
         self._restcov = restcov
+        self._families = families
         self._budgets = budgets
         self._draws = draws
         self._seed = seed
@@ -107,9 +114,16 @@ class SelectionStudy:
         pool = [record.test for record in records if record.outcome is Outcome.PASSED or not self._passing_only]
         matrix = CoverageMatrix(self._coverage, requests, pool)
         suites: list[SmallerSuite] = []
+        traffic = None
+        if self._families:
+            meta = self._recording.meta()
+            api = ApiDescription.load(Path(meta["spec"]), meta.get("restcov_base_path"))
+            traffic = TrafficCoverage.collect(records, api, self._coverage.full, self._families)
+        analysis = BudgetAnalysis(self._coverage, pool, traffic)
         for budget in self._budgets:
             size = budget.size(len(pool))
-            suites.append(self._build(CoverageSelector(), matrix, budget, 0, size, requests, out))
+            selected = self._build(CoverageSelector(), matrix, budget, 0, size, requests, out)
+            suites.append(replace(selected, warning=analysis.measure(selected.tests)))
             for draw in range(1, self._draws + 1):
                 selector = RandomSelector(RandomSelector.seed_for(self._seed, budget, draw))
                 suites.append(self._build(selector, matrix, budget, draw, size, requests, out))
@@ -251,6 +265,9 @@ class StudyReport:
                 spread = [self._spread([version["lost"][key] for version in drawn]) for key in keys]
                 spread.append(self._spread([version["requests"] for version in drawn]))
                 lines.append(f"| {label} | {selected['kept']} | Random | " + " | ".join(spread) + " |")
+        for _, selected, _ in self._by_budget():
+            if warning := selected.get("budget_warning"):
+                lines += ["", warning["report"]]
         if self.has_code:
             lines += ["", *self._code_table()]
         return "\n".join(lines) + "\n"

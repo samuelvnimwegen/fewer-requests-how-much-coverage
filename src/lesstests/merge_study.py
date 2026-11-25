@@ -13,7 +13,7 @@ from lesstests.jacoco import JaCoCo
 from lesstests.java import BuiltProject, JavaTest, Overlay
 from lesstests.merge import MergedTest, MergeOutcome, MergePlanner, Merger
 from lesstests.recording import RecordedTest, Recorder, Recording
-from lesstests.selection import CoverOptions
+from lesstests.selection import Budget, CoverOptions
 from lesstests.subjects import SUBJECTS, Runners, Subject
 from lesstests.versions import VersionPlan, VersionPlanner
 
@@ -232,7 +232,7 @@ class PlanStudy:
         self._coverage = coverage
         self._code = code
 
-    def run(self, out: Path, options: CoverOptions | None = None) -> str:
+    def run(self, out: Path, options: CoverOptions | None = None, budget: Budget | None = None) -> str:
         """Write the folder the benchmark reads. It names the recording's copy, so nothing gets built again.
 
         Returns:
@@ -243,7 +243,7 @@ class PlanStudy:
         meta = self._recording.meta()
         api = ApiDescription.load(Path(meta["spec"]), meta.get("restcov_base_path"))
         records = self._recording.records()
-        plan = VersionPlanner(api, (self._coverage, records)).plan(options)
+        plan = VersionPlanner(api, (self._coverage, records)).plan(options, budget=budget)
         if self._code is not None:
             self._code.annotate(plan)
         recording = str(self._recording.folder)
