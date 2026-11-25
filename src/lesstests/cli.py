@@ -12,10 +12,12 @@ from lesstests.code_coverage import BenchCode, RecordingCode
 from lesstests.coverage import RestCov, SuiteCoverage
 from lesstests.jacoco import JaCoCo
 from lesstests.merge_study import MergeFolder, MergeStudy, PlanStudy
+from lesstests.ranking import RankingStudy
 from lesstests.recording import RecordedTest, Recorder, Recording
 from lesstests.selection import Budget, CoverOptions
 from lesstests.study import CoverStudy, SelectionStudy
 from lesstests.subjects import SUBJECTS, Runners, SuiteCatalog
+from lesstests.traffic import FAMILIES
 from lesstests.versions import VersionPlan
 
 
@@ -120,7 +122,9 @@ class JaCoCoOption:
             raise SystemExit(str(error)) from error
 
     @classmethod
-    def recording_code(cls, args: argparse.Namespace, recording: Recording) -> RecordingCode | None:
+    def recording_code(
+        cls, args: argparse.Namespace, recording: Recording, check_folder: Path | None = None
+    ) -> RecordingCode | None:
         """Build the code coverage of a recording made with `--code-coverage`, and check it against JaCoCo once.
 
         Returns:
@@ -131,7 +135,7 @@ class JaCoCoOption:
         subject = SUBJECTS[recording.meta()["subject"]]
         code = RecordingCode.of(recording, cls.jacoco(args), subject.server_code)
         if code is not None:
-            code.check()
+            code.check(check_folder)
         return code
 
 
@@ -265,7 +269,7 @@ class CoverCommand(RecordingCommand):
         """Declare the minimum cover and its traffic constraints."""
         super().add_arguments(parser)
         parser.add_argument("--objective", choices=["tests"], help="keep the fewest tests, then the fewest requests")
-        parser.add_argument("--traffic", help="comma separated families: commands,modes,fields,readbacks")
+        parser.add_argument("--traffic", help=f"comma separated families: {', '.join(FAMILIES)}")
         parser.add_argument("--traffic-share", type=float, help="minimum share of enabled traffic items, default 1")
 
     @staticmethod
@@ -324,6 +328,31 @@ class SelectCommand(CoverCommand):
             draws = 30 if args.draws is None else args.draws
             seed = 1 if args.seed is None else args.seed
             SelectionStudy(recording, coverage, restcov, budgets, draws, seed, args.passing_only, code).run(out)
+        print((out / "report.md").read_text(encoding="utf-8"))
+
+
+class RankCommand(RecordingCommand):
+    """Compare full covers of each item family on a recording."""
+
+    name = "rank"
+    help = "rank item families by the recorded server code per kept test"
+
+    def add_arguments(self, parser: argparse.ArgumentParser) -> None:
+        """Declare the recording and report folder."""
+        super().add_arguments(parser)
+        parser.add_argument("--out", type=Path, help="report folder, defaults to ranking inside the recording")
+
+    def run(self, args: argparse.Namespace) -> None:
+        """Read the saved coverage or measure it in the output folder."""
+        recording = Recording(args.recording.resolve())
+        out = args.out or recording.folder / "ranking"
+        meta = recording.meta()
+        coverage = SuiteCoverage.load_if_current(recording.folder / "coverage" / "coverage.json", recording)
+        if coverage is None:
+            coverage = SuiteCoverage.measure(recording, RestCovOption.restcov(args, meta), out / "coverage")
+        api = ApiDescription.load(Path(meta["spec"]), meta.get("restcov_base_path"))
+        code = JaCoCoOption.recording_code(args, recording, out / "code-coverage")
+        RankingStudy(recording.records(), coverage, api).run(out, code)
         print((out / "report.md").read_text(encoding="utf-8"))
 
 
@@ -443,6 +472,7 @@ COMMANDS: tuple[Command, ...] = (
     RecordCommand(),
     CoverageCommand(),
     SelectCommand(),
+    RankCommand(),
     MergeCommand(),
     PlanCommand(),
     BenchCommand(),

@@ -1,8 +1,10 @@
 """Code coverage of recordings, plans and benchmark runs, counted from the JaCoCo dumps next to them."""
 
 import json
+import sys
 from collections.abc import Hashable, Iterable
 from dataclasses import dataclass
+from itertools import batched
 from pathlib import Path
 from typing import Any, Self
 
@@ -100,7 +102,22 @@ class RecordingCode:
         pairs = [KeptPair(name, self.files(tests), base, name in listed) for name, tests in versions.items()]
         return self._counter.kept(pairs)
 
-    def check(self) -> CodeCheck:
+    def methods_by_test(self, tests: list[JavaTest]) -> dict[JavaTest, set[str]]:
+        """List the methods reached after removing idle probes.
+
+        Returns:
+            The method names per test.
+        """
+        result = {}
+
+        # Limit the size of the helper output and share repeated method names between tests.
+        for batch in batched(tests, 48):
+            files = {test: frozenset((self.exec_of(test),)) for test in batch}
+            counts = self._counter.count(dict.fromkeys(files.values(), True))
+            result.update({test: {sys.intern(name) for name in counts[group].methods} for test, group in files.items()})
+        return result
+
+    def check(self, out: Path | None = None) -> CodeCheck:
         """Check the helper against JaCoCo's own report on all dumps of the first recording.
 
         The result is saved, and checked again once a dump is newer, such as after a resumed recording.
@@ -114,7 +131,10 @@ class RecordingCode:
         newest = max((path.stat().st_mtime for path in dumps), default=0.0)
         if saved.exists() and saved.stat().st_mtime >= newest:
             return CodeCheck.from_dict(json.loads(saved.read_text(encoding="utf-8")))
-        checked = self._counter.check(dumps, recording.code_folder / "check" / "report.xml")
+        folder = out or recording.code_folder
+        (folder / "check").mkdir(parents=True, exist_ok=True)
+        saved = folder / "check.json"
+        checked = self._counter.check(dumps, folder / "check" / "report.xml")
         saved.write_text(json.dumps(checked.to_dict(), indent=1), encoding="utf-8")
         return checked
 

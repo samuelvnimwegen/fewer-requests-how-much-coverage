@@ -266,3 +266,12 @@ def test_the_subjects_measure_the_right_package_with_their_own_ports() -> None:
 
     # The slowest frequent job runs every 15 minutes, so the idle run has to see one tick of it.
     assert 15 * 60 < FINERACT.server_code.idle_seconds <= 20 * 60
+
+
+def test_per_test_methods_drop_idle_probes(tmp_path: Path) -> None:
+    """Requirement: Method novelty counts only methods that a test reaches after removing idle probes."""
+    recording = _recording(tmp_path, {"a": "method:A method:B", "b": "method:B method:C"})
+    recording.idle_file.write_text("method:B")
+    code = RecordingCode([recording], FakeJaCoCo(tmp_path), CODE)
+    a, b = [record.test for record in recording.records()]
+    assert code.methods_by_test([a, b]) == {a: {"A"}, b: {"C"}}

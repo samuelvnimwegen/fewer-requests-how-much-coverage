@@ -503,11 +503,12 @@ def test_bench_runs_the_agent_for_a_recording_with_code_coverage_unless_told_not
 def test_every_command_on_a_recording_with_code_coverage_checks_the_helper_first(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Requirement: Commands check recorded server coverage before reporting it."""
     recording = Recording(tmp_path / "rec")
     recording.write_meta({"subject": "petstore", "code_coverage": True})
     checked: list[bool] = []
     monkeypatch.setattr(cli.RecordingCode, "__init__", lambda self, recordings, jacoco, code: None)
-    monkeypatch.setattr(cli.RecordingCode, "check", lambda self: checked.append(True))
+    monkeypatch.setattr(cli.RecordingCode, "check", lambda self, out: checked.append(True))
     args = cli.argparse.Namespace(jacoco=_jacoco_folder(tmp_path))
     assert cli.JaCoCoOption.recording_code(args, recording) is not None
     assert checked == [True]
@@ -558,3 +559,22 @@ def test_invalid_traffic_options_fail_before_reading_the_recording(options: list
     for command in [["select"], ["plan", "--out", "unused"]]:
         with pytest.raises(SystemExit, match="Unknown traffic families|Traffic share must be"):
             cli.main([*command, "--recording", "missing", *options])
+
+
+def test_rank_reports_empty_families_and_singletons_without_code(
+    tmp_path: Path, restcov: tuple[FakeRestCov, list[tuple[Path, Path]]]
+) -> None:
+    """Requirement: Ranking without code reports both cover costs and family singleton counts."""
+    recording = _recording(tmp_path / "rec")
+    (recording.folder / "spec.json").write_text('{"paths": {}}')
+    out = tmp_path / "results"
+    cli.main(["rank", "--recording", str(recording.folder), "--restcov", "fake", "--out", str(out)])
+    result = json.loads((out / "ranking.json").read_text())
+    rows = {(row["family"], row["with_restcov"]): row for row in result["covers"]}
+    assert result["full_code"] is None
+    assert rows["path", False]["singletons"] == rows["path", False]["items"] == 4
+    assert rows["operation_pairs", False]["tests"] == []
+    assert rows["operation_pairs", True]["requests"] == 4
+    assert rows["operation_pairs", True]["novelty"] is None
+    assert (out / "report.md").is_file()
+    assert not (recording.folder / "coverage").exists()
