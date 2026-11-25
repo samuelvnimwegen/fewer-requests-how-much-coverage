@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 from fake_restcov import FakeRestCov
 
+from lesstests.baselines import UniformRandom
 from lesstests.coverage import CoverageItem, CoverageSet, Criterion, SuiteCoverage
 from lesstests.exchange import Body, Exchange, Headers, HttpRequest, HttpResponse
 from lesstests.jacoco import CodeCounts, CodeKept
@@ -46,6 +47,7 @@ def test_report_shows_full_selected_and_random_rows() -> None:
 
 
 def test_passing_only_sizes_budgets_from_the_pool(tmp_path: Path) -> None:
+    """Requirement: Each comparison uses the eligible pool."""
     recording = Recording(tmp_path / "rec")
     outcomes = {"p1": Outcome.PASSED, "p2": Outcome.PASSED, "f1": Outcome.FAILED, "f2": Outcome.FAILED}
     for name, outcome in outcomes.items():
@@ -58,7 +60,7 @@ def test_passing_only_sizes_budgets_from_the_pool(tmp_path: Path) -> None:
 
     # Half of the 2 passing tests is 1. Sizing from all 4 records would keep the whole pool.
     suites = study.run(tmp_path / "selection")
-    assert [len(suite.tests) for suite in suites] == [1, 1, 1]
+    assert [len(suite.tests) for suite in suites] == [1] * 5
     assert all(test.method.startswith("p") for suite in suites for test in suite.tests)
 
 
@@ -69,16 +71,17 @@ def test_budgets_that_share_a_label_are_refused(tmp_path: Path) -> None:
         SelectionStudy(recording, coverage, FakeRestCov(), [Budget(0.5), Budget(0.5)], draws=1, seed=1)
 
 
-def _code(lines: int, lost: tuple[str, ...] = (), classes: tuple[str, ...] = ()) -> dict[str, object]:
-    return CodeKept(CodeCounts(lines, 2, 1), CodeCounts(100, 4, 2), lost, classes).to_dict()
+def _code(lines: int, lost: tuple[str, ...] = (), classes: tuple[str, ...] = (), total: int = 100) -> dict[str, object]:
+    return CodeKept(CodeCounts(lines, 2, 1), CodeCounts(total, 4, 2), lost, classes).to_dict()
 
 
 def test_report_adds_the_server_code_each_version_keeps_and_lists_what_selected_lost() -> None:
+    """Requirement: Each code metric ranks Selected against the draws and gives ties the same rank."""
     result = {
         "tests": 4,
         "requests": 9,
         "pool": 4,
-        "draws": 2,
+        "draws": 3,
         "full": _counts(path=2, all=2),
         "versions": [
             {
@@ -87,18 +90,42 @@ def test_report_adds_the_server_code_each_version_keeps_and_lists_what_selected_
                 "kept": 2,
                 "requests": 3,
                 "lost": _counts(),
-                "code": _code(90, ("a.B.x()V",), ("a.B",)),
+                "code": _code(99995, ("a.B.x()V",), ("a.B",), total=100000),
             },
-            {"version": "random", "budget": 0.5, "kept": 2, "requests": 4, "lost": _counts(), "code": _code(60)},
-            {"version": "random", "budget": 0.5, "kept": 2, "requests": 6, "lost": _counts(), "code": _code(62)},
-            {"version": "random", "budget": 0.5, "kept": 2, "requests": 5, "lost": _counts(), "code": _code(100)},
+            {
+                "version": "random",
+                "budget": 0.5,
+                "kept": 2,
+                "requests": 4,
+                "lost": _counts(),
+                "code": _code(60000, total=100000),
+            },
+            {
+                "version": "random",
+                "budget": 0.5,
+                "kept": 2,
+                "requests": 6,
+                "lost": _counts(),
+                "code": _code(62000, total=100000),
+            },
+            {
+                "version": "random",
+                "budget": 0.5,
+                "kept": 2,
+                "requests": 5,
+                "lost": _counts(),
+                "code": _code(99996, total=100000),
+            },
         ],
     }
     report = StudyReport(result)
     lines = report.markdown().splitlines()
-    assert "| 100% | 4 | Full suite | 100 | 4 | 2 |  |  |" in lines
-    assert "| 50% | 2 | Selected | 90.0% | 50.0% | 50.0% | 1 | 1 |" in lines
-    assert "| 50% | 2 | Random | 74.0% (60.0%, 100.0%) | 50.0% (50.0%, 50.0%) | 50.0% (50.0%, 50.0%) |  |  |" in lines
+    assert "| 100% | 4 | Full suite | 100000 | 4 | 2 |  |  |" in lines
+    assert "| 50% | 2 | Selected | 100.0% | 50.0% | 50.0% | 1 | 1 |" in lines
+    assert (
+        "| 50% | 2 | Random | 74.0% (60.0%, 100.0%), rank 2/4 | "
+        "50.0% (50.0%, 50.0%), rank 1/4 | 50.0% (50.0%, 50.0%), rank 1/4 |  |  |"
+    ) in lines
     lost = report.code_lost()
     assert "Classes that lost every method the full suite reached: 1. Methods no longer reached: 1." in lost
     assert "### Classes\n\n* `a.B`\n\n### Methods\n\n* `a.B.x()V`\n" in lost
@@ -133,6 +160,7 @@ class FakeRecordingCode:
 
 
 def test_the_study_counts_every_smaller_suite_in_one_go_and_lists_only_selected(tmp_path: Path) -> None:
+    """Requirement: Every version gets code counts and only Selected lists lost methods."""
     recording = Recording(tmp_path / "rec")
     for name in ("a", "b", "c", "d"):
         request = HttpRequest("GET", f"/v2/{name}", Headers(), Body())
@@ -146,10 +174,16 @@ def test_the_study_counts_every_smaller_suite_in_one_go_and_lists_only_selected(
 
     assert code.asked is not None
     versions, reference, listed = code.asked
-    assert sorted(versions) == ["random-50-1", "random-50-2", "selected-50-0"]
+    assert sorted(versions) == [
+        "length-matched-random-50-1",
+        "length-matched-random-50-2",
+        "random-50-1",
+        "random-50-2",
+        "selected-50-0",
+    ]
     assert len(reference) == 4
     assert listed == frozenset({"selected-50-0"})
-    assert [suite.code.share("lines") for suite in suites if suite.code] == [0.5, 0.5, 0.5]
+    assert [suite.code.share("lines") for suite in suites if suite.code] == [0.5] * 5
     assert (tmp_path / "selection" / "code-lost.md").exists()
 
     # A later run without code coverage must not leave the old list behind.
@@ -179,3 +213,32 @@ def test_the_code_table_lists_the_largest_budget_first() -> None:
     lines = StudyReport(result).markdown().splitlines()
     rows = [line for line in lines if line.startswith(("| 75% | 1 | Selected | 90.0%", "| 25% | 1 | Selected | 50.0%"))]
     assert [row[:5] for row in rows] == ["| 75%", "| 25%"]
+
+
+@pytest.mark.parametrize("name", ["random", "selected"])
+def test_baselines_need_unique_names(tmp_path: Path, name: str) -> None:
+    """Requirement: A baseline cannot reuse another baseline's name or the name selected."""
+    baseline = UniformRandom()
+    baseline.name = name
+    with pytest.raises(ValueError, match="Baseline names"):
+        SelectionStudy(
+            Recording(tmp_path),
+            SuiteCoverage({}, CoverageSet(), {}),
+            FakeRestCov(),
+            [],
+            1,
+            1,
+            baselines=(UniformRandom(), baseline),
+        )
+
+
+def test_report_keeps_baseline_ids_separate() -> None:
+    """Requirement: Baseline IDs that differ only in case get separate ranks."""
+    rows = [
+        {"version": name, "budget": 0.5, "kept": 1, "requests": 1, "lost": _counts(), "code": _code(lines)}
+        for name, lines in [("selected", 50), ("fast-r", 40), ("FAST-R", 60)]
+    ]
+    report = StudyReport({"tests": 2, "requests": 2, "pool": 2, "draws": 1, "full": _counts(), "versions": rows})
+    table = report.markdown()
+    assert "| fast-r | 40.0% (40.0%, 40.0%), rank 1/2 |" in table
+    assert "| FAST-R | 60.0% (60.0%, 60.0%), rank 2/2 |" in table

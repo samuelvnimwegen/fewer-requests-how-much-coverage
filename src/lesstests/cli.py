@@ -13,7 +13,7 @@ from lesstests.coverage import RestCov, SuiteCoverage
 from lesstests.jacoco import JaCoCo
 from lesstests.merge_study import MergeFolder, MergeStudy, PlanStudy
 from lesstests.recording import RecordedTest, Recorder, Recording
-from lesstests.selection import Budget
+from lesstests.selection import Budget, CoverBudget
 from lesstests.study import SelectionStudy
 from lesstests.subjects import SUBJECTS, Runners, SuiteCatalog
 from lesstests.versions import VersionPlan
@@ -264,10 +264,25 @@ class SelectCommand(RecordingCommand):
     name = "select"
     help = "compare Selected with Random at each budget, from the recording alone"
 
+    @staticmethod
+    def budget(value: str) -> Budget | CoverBudget:
+        """Read a percentage or the smallest cover budget.
+
+        Returns:
+            The requested budget.
+        """
+        return CoverBudget() if value == "cover" else Budget(float(value) / 100)
+
     def add_arguments(self, parser: argparse.ArgumentParser) -> None:
         """Declare the recording, RESTCov, the budgets and the draws."""
         super().add_arguments(parser)
-        parser.add_argument("--budgets", type=float, nargs="+", default=[75, 50, 25], help="percentages to keep")
+        parser.add_argument(
+            "--budgets",
+            nargs="+",
+            type=self.budget,
+            default=[Budget(0.75), Budget(0.5), Budget(0.25)],
+            help="percentages to keep or cover",
+        )
         parser.add_argument("--draws", type=int, default=30, help="random draws per budget")
         parser.add_argument("--seed", type=int, default=1)
         parser.add_argument("--passing-only", action="store_true", help="only pick tests that passed alone")
@@ -277,10 +292,11 @@ class SelectCommand(RecordingCommand):
         recording = Recording(args.recording.resolve())
         restcov = RestCovOption.restcov(args, recording.meta())
         coverage = self.coverage(recording, restcov)
-        budgets = [Budget(percent / 100) for percent in args.budgets]
         out = recording.folder / "selection"
         code = JaCoCoOption.recording_code(args, recording)
-        study = SelectionStudy(recording, coverage, restcov, budgets, args.draws, args.seed, args.passing_only, code)
+        study = SelectionStudy(
+            recording, coverage, restcov, args.budgets, args.draws, args.seed, args.passing_only, code
+        )
         study.run(out)
         print((out / "report.md").read_text(encoding="utf-8"))
 

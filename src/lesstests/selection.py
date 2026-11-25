@@ -1,7 +1,7 @@
 import math
 import random
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Literal
 
 import numpy as np
 from scipy.optimize import Bounds, LinearConstraint, milp
@@ -26,6 +26,14 @@ class Budget:
         if not 0 < self.share <= 1:
             raise ValueError(f"A budget keeps more than 0% and at most 100% of the tests, not {self.share * 100}%")
 
+    def pick(self, matrix: "CoverageMatrix", coverage: SuiteCoverage, requests: dict[JavaTest, int]) -> list[JavaTest]:
+        """Pick the suite at this share of the eligible pool.
+
+        Returns:
+            The Selected tests.
+        """
+        return CoverageSelector().select(matrix, self.size(len(matrix.tests)))
+
     def size(self, tests: int) -> int:
         """Turn the share into a number of tests, rounding halves up and keeping at least one.
 
@@ -41,6 +49,22 @@ class Budget:
         return f"{self.share * 100:g}%"
 
 
+class CoverBudget:
+    """Keep the smallest suite that covers every item in the eligible pool."""
+
+    label = "cover"
+    share: Literal["cover"] = "cover"
+
+    def pick(self, matrix: "CoverageMatrix", coverage: SuiteCoverage, requests: dict[JavaTest, int]) -> list[JavaTest]:
+        """Cover the items the eligible tests can reach.
+
+        Returns:
+            The smallest cover, breaking ties by the fewest requests.
+        """
+        candidates = {test: coverage.per_test[test] for test in matrix.tests}
+        return SmallestCover().select(candidates, requests, coverage.of(matrix.tests))
+
+
 class CoverageMatrix:
     """Which tests reach which coverage items, plus the requests each test sends."""
 
@@ -51,20 +75,6 @@ class CoverageMatrix:
         self.items: list[CoverageItem] = sorted({item for test in self.tests for item in coverage.per_test[test].items})
         index = {item: number for number, item in enumerate(self.items)}
         self.reaches = [sorted(index[item] for item in coverage.per_test[test].items) for test in self.tests]
-
-
-class Selector(Protocol):
-    """Picks a given number of tests from a matrix."""
-
-    name: str
-
-    def select(self, matrix: CoverageMatrix, size: int) -> list[JavaTest]:
-        """Pick tests.
-
-        Returns:
-            The picked tests.
-        """
-        ...
 
 
 class RandomSelector:
@@ -85,13 +95,14 @@ class RandomSelector:
         return sorted(self._random.sample(matrix.tests, min(size, len(matrix.tests))))
 
     @staticmethod
-    def seed_for(base: int, budget: Budget, draw: int) -> int:
+    def seed_for(base: int, budget: Budget | CoverBudget, draw: int) -> int:
         """Give every budget and draw its own seed, so adding a budget leaves the other draws unchanged.
 
         Returns:
             The seed.
         """
-        return base * 1_000_003 + round(budget.share * 1000) * 1_009 + draw
+        key = -1 if budget.share == "cover" else round(budget.share * 1000)
+        return base * 1_000_003 + key * 1_009 + draw
 
 
 class CoverageSelector:
@@ -190,13 +201,18 @@ class SmallestCover:
         integrality = np.ones(len(tests))
         bounds = Bounds(0, 1)
 
-        fewest_tests = milp(np.ones(len(tests)), constraints=[every_item], integrality=integrality, bounds=bounds)
+        options = {"mip_rel_gap": 0.0}
+        fewest_tests = milp(
+            np.ones(len(tests)), constraints=[every_item], integrality=integrality, bounds=bounds, options=options
+        )
         if not fewest_tests.success:
             raise RuntimeError(f"The cover program failed: {fewest_tests.message}")
         size = round(fewest_tests.fun)
         keep_size = LinearConstraint(np.ones((1, len(tests))), size, size)
         cost = np.asarray([requests[test] for test in tests], dtype=float)
-        cheapest = milp(cost, constraints=[every_item, keep_size], integrality=integrality, bounds=bounds)
+        cheapest = milp(
+            cost, constraints=[every_item, keep_size], integrality=integrality, bounds=bounds, options=options
+        )
         if not cheapest.success:
             raise RuntimeError(f"The request program failed: {cheapest.message}")
         return sorted(test for test, chosen in zip(tests, cheapest.x, strict=True) if chosen > 0.5)

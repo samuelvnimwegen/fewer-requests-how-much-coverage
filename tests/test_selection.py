@@ -1,5 +1,6 @@
 import pytest
 
+from lesstests.baselines import LengthMatchedRandom
 from lesstests.coverage import CoverageItem, CoverageSet, Criterion, SuiteCoverage
 from lesstests.java import JavaTest
 from lesstests.selection import Budget, CoverageMatrix, CoverageSelector, RandomSelector, SmallestCover
@@ -104,3 +105,19 @@ def test_smallest_cover_refuses_a_target_nobody_reaches() -> None:
     target = CoverageSet([CoverageItem(Criterion.STATUS, "2")])
     with pytest.raises(ValueError, match="No candidate reaches 1"):
         SmallestCover().select(candidates, {_test("a"): 1}, target)
+
+
+def test_matched_draw_samples_each_exact_length_without_replacement() -> None:
+    """Requirement: Matched draws repeat by seed and keep the exact test lengths of Selected."""
+    lengths = {str(i): i // 5 for i in range(20)}
+    lengths["only_long_test"] = 10
+    matrix = _matrix(dict.fromkeys(lengths, set()), lengths)
+    selected = [_test(str(i)) for i in (0, 1, 6, 10, 11, 12)]
+    selected.append(_test("only_long_test"))
+    baseline = LengthMatchedRandom()
+    draws = [baseline.draw(matrix, selected, seed) for seed in (1, 1, 2)]
+    assert draws[0] == draws[1] != draws[2]
+    for draw in draws:
+        assert len(set(draw)) == len(selected)
+        assert _test("only_long_test") in draw
+        assert sorted(lengths[test.method] for test in draw) == [0, 0, 1, 2, 2, 2, 10]
