@@ -5,11 +5,12 @@ import json
 import re
 import threading
 import zlib
+from abc import ABC, abstractmethod
 from collections.abc import Iterator
 from dataclasses import dataclass, replace
 from decimal import Decimal
 from http import HTTPStatus
-from typing import Any, Protocol, Self
+from typing import Any, Self
 from urllib.parse import parse_qs, urlsplit
 
 from lesstests.api import ApiDescription
@@ -28,6 +29,15 @@ class FaultFamily:
     path: FieldPath
     change: str
 
+    @property
+    def kind(self) -> str:
+        """Group scalar variants for the report.
+
+        Returns:
+            The edit kind across scalar types.
+        """
+        return "wrong value" if self.change in WrongValue.VARIANTS.values() else self.change
+
     @classmethod
     def from_dict(cls, row: dict[str, Any]) -> Self:
         """Read one family from the saved inventory.
@@ -40,26 +50,14 @@ class FaultFamily:
 
 @dataclass(slots=True)
 class Location:
-    """One value and the concrete path to it inside a JSON document."""
+    """A value, its concrete path and its spans in the decoded JSON text."""
 
     value: Any
-    path: FieldPath
-    parent: Any
-    key: int | str
-
-    def walk(self) -> Iterator["Location"]:
-        """Visit the parent before its children.
-
-        Yields:
-            Each location in document order.
-        """
-        yield self
-        if isinstance(self.value, dict):
-            for key, child in self.value.items():
-                yield from Location(child, (*self.path, key), self.value, key).walk()
-        elif isinstance(self.value, list):
-            for index, child in enumerate(self.value):
-                yield from Location(child, (*self.path, None), self.value, index).walk()
+    path: tuple[str | int, ...]
+    start: int
+    end: int
+    member_start: int
+    member_end: int
 
     @property
     def identifier(self) -> bool:
@@ -69,101 +67,79 @@ class Location:
             Whether this field takes an identifier edit.
         """
         return (
-            isinstance(self.key, str)
-            and (self.key.lower() == "id" or self.key.endswith("Id"))
+            bool(self.path)
+            and isinstance(self.path[-1], str)
+            and (self.path[-1].lower() == "id" or self.path[-1].endswith("Id"))
             and type(self.value) in (int, str)
         )
 
 
-class ResponseChange(Protocol):
-    """A change that recognises its locations and edits one response."""
+@dataclass(frozen=True, slots=True)
+class Edit:
+    """The concrete path and exact JSON tokens, with None for a removed member."""
 
-    def kind(self, location: Location | None) -> str | None:
-        """Identify the edit at this location.
-
-        Returns:
-            The family kind when eligible.
-        """
-        ...
-
-    def apply(self, response: HttpResponse, location: Location | None, root: list[Any]) -> HttpResponse:
-        """Apply one eligible edit.
-
-        Returns:
-            The changed response.
-        """
-        ...
+    path: tuple[str | int, ...]
+    original: str
+    replacement: str | None
 
 
-class StatusChange:
-    """Change just the status line, including for empty or binary bodies."""
+@dataclass(frozen=True, slots=True)
+class FaultHit:
+    """The upstream exchange and all edits made to its response."""
 
-    def kind(self, location: Location | None) -> str | None:
-        """Check for the response itself.
+    exchange: Exchange
+    edits: tuple[Edit, ...]
+
+
+class BodyChange(ABC):
+    """Recognise eligible values and choose their replacement."""
+
+    @abstractmethod
+    def kind(self, location: Location) -> str | None:
+        """Check eligibility.
 
         Returns:
-            The status kind for the response itself.
+            The family name if the value is eligible.
         """
-        return "status" if location is None else None
 
-    def apply(self, response: HttpResponse, location: Location | None, root: list[Any]) -> HttpResponse:
-        """Keep the body bytes as received.
+    @abstractmethod
+    def edit(self, location: Location) -> Any:
+        """Choose the new value.
 
         Returns:
-            The response with a different status line.
+            The replacement or None to remove the named member.
         """
-        status = HTTPStatus.BAD_REQUEST if 200 <= response.status < 300 else HTTPStatus.OK
-        return replace(response, status=status.value, reason=status.phrase)
-
-
-class BodyChange:
-    """Write the changed JSON without stale lengths, encodings or validators."""
-
-    def apply(self, response: HttpResponse, location: Location | None, root: list[Any]) -> HttpResponse:
-        """Write the edited document.
-
-        Returns:
-            The edited JSON as UTF8 bytes.
-        """
-        assert location is not None
-        self.edit(location)
-        data = json.dumps(root[0], separators=(",", ":"), allow_nan=False).encode()
-        headers = response.headers.without(
-            "content-encoding", "content-length", "etag", "content-md5", "digest", "repr-digest", "content-digest"
-        )
-        return replace(response, body=Body(data), headers=headers)
-
-    def edit(self, location: Location) -> None:
-        """Edit one location in place.
-
-        Raises:
-            NotImplementedError: When the kind has no edit.
-        """
-        raise NotImplementedError
 
 
 class WrongValue(BodyChange):
     """Change a scalar while keeping its JSON type."""
 
-    def kind(self, location: Location | None) -> str | None:
+    VARIANTS = {
+        bool: "wrong value.boolean",
+        str: "wrong value.string",
+        int: "wrong value.number",
+        float: "wrong value.number",
+    }
+
+    def kind(self, location: Location) -> str | None:
         """Choose the edit for this scalar.
 
         Returns:
             The scalar kind if the replacement differs.
         """
-        if location is None or location.identifier:
+        if location.identifier:
             return None
         value = location.value
-        if isinstance(value, bool):
-            return "wrong value.boolean"
-        if isinstance(value, str):
-            return "wrong value.string"
-        if isinstance(value, (float, int)) and value + 1 != value:
-            return "wrong value.number"
-        return None
+        if type(value) in (int, float) and value + 1 == value:
+            return None
+        return self.VARIANTS.get(type(value))
 
-    def edit(self, location: Location) -> None:
-        """Replace the scalar in its parent."""
+    def edit(self, location: Location) -> Any:
+        """Choose a replacement for this scalar.
+
+        Returns:
+            A different scalar of the same type.
+        """
         value = location.value
         if isinstance(value, bool):
             changed = not value
@@ -171,22 +147,26 @@ class WrongValue(BodyChange):
             changed = "changed" if value != "changed" else "other"
         else:
             changed = value + 1
-        location.parent[location.key] = changed
+        return changed
 
 
 class WrongId(BodyChange):
     """Change an identifier while preserving the shape of common string ids."""
 
-    def kind(self, location: Location | None) -> str | None:
+    def kind(self, location: Location) -> str | None:
         """Recognise identifier fields.
 
         Returns:
             The identifier kind for integer and string id fields.
         """
-        return "wrong id" if location is not None and location.identifier else None
+        return "wrong id" if location.identifier else None
 
-    def edit(self, location: Location) -> None:
-        """Change one character of a string id or increment an integer id."""
+    def edit(self, location: Location) -> Any:
+        """Change one character of a string id or increment an integer id.
+
+        Returns:
+            The changed identifier.
+        """
         value = location.value
         if isinstance(value, str):
             match = re.search(r"[0-9a-zA-Z]", value[::-1])
@@ -200,45 +180,56 @@ class WrongId(BodyChange):
                 value += "1"
         else:
             value += 1
-        location.parent[location.key] = value
+        return value
 
 
 class MissingField(BodyChange):
     """Remove a named member, including one whose value is null."""
 
-    def kind(self, location: Location | None) -> str | None:
+    def kind(self, location: Location) -> str | None:
         """Recognise named members.
 
         Returns:
             The missing field kind for object members.
         """
-        return "missing field" if location is not None and isinstance(location.key, str) else None
+        return "missing field" if location.path and isinstance(location.path[-1], str) else None
 
-    def edit(self, location: Location) -> None:
-        """Remove the member from its object."""
-        del location.parent[location.key]
+    def edit(self, location: Location) -> Any:
+        """Remove the member from its object.
+
+        Returns:
+            None to remove this member.
+        """
+        return None
 
 
 class EmptyList(BodyChange):
     """Empty a list that has at least one item."""
 
-    def kind(self, location: Location | None) -> str | None:
+    def kind(self, location: Location) -> str | None:
         """Recognise populated arrays.
 
         Returns:
             The empty list kind for a populated array.
         """
-        return "empty list" if location is not None and isinstance(location.value, list) and location.value else None
+        return "empty list" if isinstance(location.value, list) and location.value else None
 
-    def edit(self, location: Location) -> None:
-        """Remove the list's items."""
-        location.value.clear()
+    def edit(self, location: Location) -> Any:
+        """Remove the list's items.
+
+        Returns:
+            An empty list.
+        """
+        return []
 
 
-class ResponseFaults:
-    """Find eligible edits using the same rules offline and at the proxy."""
+@dataclass(slots=True)
+class JsonDocument:
+    """The original text and its values in document order."""
 
-    BODY_CHANGES = (MissingField(), EmptyList(), WrongId(), WrongValue())
+    text: str
+    encoding: str
+    locations: list[Location]
 
     @staticmethod
     def _number(token: str) -> float:
@@ -248,7 +239,7 @@ class ResponseFaults:
             A number that survives JSON serialisation.
 
         Raises:
-            ValueError: If rewriting it would change another field.
+            ValueError: If the token has no exact decimal round trip through float.
         """
         value = float(token)
         if not Decimal(str(value)).is_finite() or Decimal(str(value)) != Decimal(token):
@@ -271,45 +262,138 @@ class ResponseFaults:
         return value
 
     @classmethod
-    def locations(cls, exchange: Exchange) -> Iterator[tuple[ResponseChange, Location | None, list[Any]]]:
-        """Find the status and each editable body location.
+    def read(cls, exchange: Exchange) -> Self | None:
+        """Validate the whole document before offering a body edit.
 
-        Yields:
-            The edit, its location and the parsed root.
+        Returns:
+            The indexed document if the response supports body edits.
         """
-        yield StatusChange(), None, []
         response = exchange.response
         encoding = (response.headers.get("content-encoding") or "identity").lower().strip()
         if exchange.request.method == "HEAD" or encoding not in ("gzip", "identity"):
-            return
+            return None
         try:
             data = gzip.decompress(response.body.data) if encoding == "gzip" else response.body.data
-            value = json.loads(data, parse_float=cls._number, parse_constant=cls._number, object_pairs_hook=cls._object)
-        except (OSError, EOFError, zlib.error, ValueError, RecursionError):
-            return
-        root = [value]
-        for location in Location(value, (), root, 0).walk():
-            for change in cls.BODY_CHANGES:
-                yield change, location, root
+            charset = json.detect_encoding(data)
 
-    @classmethod
-    def candidates(
-        cls, operation: str, exchange: Exchange
-    ) -> Iterator[tuple[FaultFamily, ResponseChange, Location | None, list[Any]]]:
+            # Keep the byte order mark in the text so writing it preserves the original byte order.
+            if charset in ("utf-16", "utf-32"):
+                charset += "-le" if data.startswith(b"\xff\xfe") else "-be"
+            elif charset == "utf-8-sig":
+                charset = "utf-8"
+            text = data.decode(charset, errors="surrogatepass")
+            value = json.loads(
+                text.removeprefix("\ufeff"),
+                parse_float=cls._number,
+                parse_constant=cls._number,
+                object_pairs_hook=cls._object,
+            )
+            document = cls(text, charset, [])
+            tokens = re.compile(r'"(?:[^"\\]|\\.)*"|[{}\[\],:]|[^\s{}\[\],:"]+').finditer(
+                text, int(text.startswith("\ufeff"))
+            )
+            document._walk(value, (), tokens)
+            return document
+        except (OSError, EOFError, zlib.error, ValueError, RecursionError):
+            return None
+
+    def _walk(self, value: Any, path: tuple[str | int, ...], tokens: Iterator[re.Match[str]]) -> Location:
+        """Pair validated values with the tokens that spell them.
+
+        Returns:
+            The indexed location including its closing delimiter.
+        """
+        token = next(tokens)
+        node = Location(value, path, token.start(), token.end(), token.start(), token.end())
+        self.locations.append(node)
+        if isinstance(value, (dict, list)):
+            comma = None
+            for key, child in value.items() if isinstance(value, dict) else enumerate(value):
+                member = next(tokens).start() if isinstance(key, str) else None
+                if member is not None:
+                    next(tokens)
+                item = self._walk(child, (*path, key), tokens)
+                delimiter = next(tokens)
+                if member is not None:
+                    item.member_start = comma if comma is not None else member
+                    item.member_end = item.end if comma is not None or delimiter[0] == "}" else delimiter.end()
+                comma = delimiter.start()
+                node.end = delimiter.end()
+            if not value:
+                node.end = next(tokens).end()
+        return node
+
+    def rewrite(self, response: HttpResponse, matches: list["Candidate"]) -> tuple[HttpResponse, tuple[Edit, ...]]:
+        """Copy the original text between the matching locations.
+
+        Returns:
+            The changed response and each edit in document order.
+        """
+        parts: list[str] = []
+        edits: list[Edit] = []
+        cursor = 0
+        for candidate in matches:
+            location = candidate.location
+            replacement = candidate.change.edit(location)
+            token = json.dumps(replacement) if replacement is not None else None
+            edits.append(Edit(location.path, self.text[location.start : location.end], token))
+            start, end = (
+                (location.start, location.end) if token is not None else (location.member_start, location.member_end)
+            )
+            parts.extend((self.text[cursor:start], token or ""))
+            cursor = end
+        parts.append(self.text[cursor:])
+        headers = response.headers.without(
+            "content-encoding", "content-length", "etag", "content-md5", "digest", "repr-digest", "content-digest"
+        )
+        return replace(
+            response, body=Body("".join(parts).encode(self.encoding, errors="surrogatepass")), headers=headers
+        ), tuple(edits)
+
+
+@dataclass(slots=True)
+class Candidate:
+    """A body edit at one concrete location."""
+
+    family: FaultFamily
+    location: Location
+    change: BodyChange
+
+
+class ResponseFaults:
+    """Find eligible edits using the same rules offline and at the proxy."""
+
+    BODY_CHANGES = (MissingField(), EmptyList(), WrongId(), WrongValue())
+
+    def __init__(self, operation: str, exchange: Exchange) -> None:
+        """Keep the request context shared by the status and body families."""
+        query = parse_qs(urlsplit(exchange.request.target).query, keep_blank_values=True)
+        self.status = FaultFamily(operation, query.get("command", [None])[0], exchange.response.status, (), "status")
+        self.exchange = exchange
+
+    def candidates(self, document: JsonDocument) -> Iterator[Candidate]:
         """Group concrete locations by operation and folded path.
 
         Yields:
-            Families with the edits that produce them.
+            Each eligible body edit.
         """
-        query = parse_qs(urlsplit(exchange.request.target).query, keep_blank_values=True)
-        command = query.get("command", [None])[0]
-        for change, location, root in cls.locations(exchange):
-            kind = change.kind(location)
-            if kind is not None:
-                family = FaultFamily(
-                    operation, command, exchange.response.status, location.path if location else (), kind
-                )
-                yield family, change, location, root
+        for location in document.locations:
+            path = tuple(None if isinstance(key, int) else key for key in location.path)
+            for change in self.BODY_CHANGES:
+                kind = change.kind(location)
+                if kind:
+                    yield Candidate(replace(self.status, path=path, change=kind), location, change)
+
+    def families(self) -> Iterator[FaultFamily]:
+        """List the status and body families this response exposes.
+
+        Yields:
+            Each family in document order.
+        """
+        yield self.status
+        if document := JsonDocument.read(self.exchange):
+            for candidate in self.candidates(document):
+                yield candidate.family
 
 
 class ProxyFault:
@@ -317,10 +401,28 @@ class ProxyFault:
 
     def __init__(self, api: ApiDescription, family: FaultFamily) -> None:
         """Arm the proxy with a family from the inventory."""
-        self.api = api
-        self.family = family
-        self.applied = False
+        self._api = api
+        self._family = family
+        self._hit: FaultHit | None = None
         self._lock = threading.Lock()
+
+    @property
+    def hit(self) -> FaultHit | None:
+        """Read the recorded hit.
+
+        Returns:
+            The original exchange and its changes after a match.
+        """
+        return self._hit
+
+    @property
+    def applied(self) -> bool:
+        """Check the fault state.
+
+        Returns:
+            Whether a response received the armed fault.
+        """
+        return self._hit is not None
 
     def apply(self, exchange: Exchange) -> HttpResponse:
         """Try the armed family.
@@ -328,14 +430,21 @@ class ProxyFault:
         Returns:
             The changed response on the first match or the upstream response.
         """
+        response = exchange.response
         with self._lock:
-            if not self.applied:
-                operation = self.api.match(exchange.request.method, exchange.request.target)
-                if operation is not None and operation.name == self.family.operation:
-                    for family, change, location, root in ResponseFaults.candidates(operation.name, exchange):
-                        if family == self.family:
-                            changed = change.apply(exchange.response, location, root)
-                            if changed.status != exchange.response.status or changed.body != exchange.response.body:
-                                self.applied = True
-                                return changed
-        return exchange.response
+            if self.applied:
+                return response
+            operation = self._api.match(exchange.request.method, exchange.request.target)
+            if operation is None or operation.name != self._family.operation:
+                return response
+            faults = ResponseFaults(operation.name, exchange)
+            if faults.status == self._family:
+                status = HTTPStatus.BAD_REQUEST if 200 <= response.status < 300 else HTTPStatus.OK
+                self._hit = FaultHit(exchange, (Edit((), str(response.status), str(status.value)),))
+                return replace(response, status=status.value, reason=status.phrase)
+            document = JsonDocument.read(exchange)
+            if document and (matches := [c for c in faults.candidates(document) if c.family == self._family]):
+                changed, edits = document.rewrite(response, matches)
+                self._hit = FaultHit(exchange, edits)
+                return changed
+        return response

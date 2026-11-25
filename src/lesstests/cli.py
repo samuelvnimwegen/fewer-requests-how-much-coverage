@@ -415,9 +415,14 @@ class FaultsCommand:
         meta = recording.meta()
         api = ApiDescription.load(Path(meta["spec"]), meta.get("restcov_base_path"))
         inventory = FaultInventory.build(recording, api)
-        kept = set(args.kept.read_text(encoding="utf-8").splitlines()) if args.kept else None
+        kept = (
+            {line.strip() for line in args.kept.read_text(encoding="utf-8").splitlines() if line.strip()}
+            if args.kept
+            else None
+        )
+        report = inventory.report(kept)
         inventory.save(args.out)
-        print(json.dumps(inventory.report(kept), indent=2))
+        print(json.dumps(report, indent=2))
 
 
 COMMANDS: tuple[Command, ...] = (

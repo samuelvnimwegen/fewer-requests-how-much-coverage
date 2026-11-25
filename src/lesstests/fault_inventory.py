@@ -17,6 +17,7 @@ class FaultInventory:
     """The distinct recorded tests that receive each family."""
 
     receivers: dict[FaultFamily, set[str]]
+    tests: set[str]
 
     @classmethod
     def build(cls, recording: Recording, api: ApiDescription) -> Self:
@@ -27,13 +28,15 @@ class FaultInventory:
         """
         match = lru_cache(maxsize=8192)(api.match)
         receivers = defaultdict[FaultFamily, set[str]](set)
+        tests: set[str] = set()
         for record in recording.records():
+            tests.add(record.test.id)
             for exchange in record.exchanges:
                 operation = match(exchange.request.method, exchange.request.target)
                 if operation is not None:
-                    for family, _, _, _ in ResponseFaults.candidates(operation.name, exchange):
+                    for family in ResponseFaults(operation.name, exchange).families():
                         receivers[family].add(record.test.id)
-        return cls(dict(receivers))
+        return cls(dict(receivers), tests)
 
     def save(self, path: Path) -> None:
         """Write the families in recording order with sorted test ids."""
@@ -45,8 +48,13 @@ class FaultInventory:
 
         Returns:
             Counts by change, with single receivers and losses for the given suite.
+
+        Raises:
+            ValueError: If a kept id is missing from the recording.
         """
-        kinds = Counter(family.change.split(".")[0] for family in self.receivers)
+        if kept and (unknown := kept - self.tests):
+            raise ValueError(f"Unknown kept test ids: {', '.join(sorted(unknown))}")
+        kinds = Counter(family.kind for family in self.receivers)
         report: dict[str, object] = {
             "families": len(self.receivers),
             "per_change": dict(sorted(kinds.items())),
