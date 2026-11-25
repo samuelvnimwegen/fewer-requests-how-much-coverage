@@ -1,15 +1,17 @@
 import json
 import statistics
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from lesstests.baselines import Baseline, LengthMatchedRandom, UniformRandom
 from lesstests.code_coverage import RecordingCode
 from lesstests.coverage import CoverageSet, Criterion, RestCov, SuiteCoverage
 from lesstests.jacoco import CodeKept
 from lesstests.java import JavaTest, Outcome
 from lesstests.recording import Recording
-from lesstests.selection import Budget, CoverageMatrix, CoverageSelector, RandomSelector, Selector
+from lesstests.selection import Budget, CoverageMatrix, CoverageSelector, CoverBudget, RandomSelector
 
 
 @dataclass(frozen=True, slots=True)
@@ -17,7 +19,7 @@ class SmallerSuite:
     """One smaller version of a suite and what it lost against the full suite."""
 
     version: str
-    budget: Budget
+    budget: Budget | CoverBudget
     draw: int
     tests: list[JavaTest]
     coverage: CoverageSet
@@ -69,11 +71,12 @@ class SelectionStudy:
         recording: Recording,
         coverage: SuiteCoverage,
         restcov: RestCov,
-        budgets: list[Budget],
+        budgets: Sequence[Budget | CoverBudget],
         draws: int,
         seed: int,
         passing_only: bool = False,
         code: RecordingCode | None = None,
+        baselines: Sequence[Baseline] = (UniformRandom(), LengthMatchedRandom()),
     ) -> None:
         """Set up the study. With `passing_only`, both selectors pick only from tests that passed alone.
 
@@ -93,6 +96,7 @@ class SelectionStudy:
         self._seed = seed
         self._passing_only = passing_only
         self._code = code
+        self._baselines = baselines
 
     def run(self, out: Path) -> list[SmallerSuite]:
         """Build every smaller suite, measure it and write the results to `out`.
@@ -106,11 +110,13 @@ class SelectionStudy:
         matrix = CoverageMatrix(self._coverage, requests, pool)
         suites: list[SmallerSuite] = []
         for budget in self._budgets:
-            size = budget.size(len(pool))
-            suites.append(self._build(CoverageSelector(), matrix, budget, 0, size, requests, out))
+            selected = budget.pick(matrix, self._coverage, requests)
+            suites.append(self._build("selected", selected, budget, 0, requests, out))
             for draw in range(1, self._draws + 1):
-                selector = RandomSelector(RandomSelector.seed_for(self._seed, budget, draw))
-                suites.append(self._build(selector, matrix, budget, draw, size, requests, out))
+                seed = RandomSelector.seed_for(self._seed, budget, draw)
+                for baseline in self._baselines:
+                    tests = baseline.draw(matrix, selected, seed)
+                    suites.append(self._build(baseline.name, tests, budget, draw, requests, out))
         if self._code is not None:
             suites = self._with_code(self._code, [record.test for record in records], suites)
         self._write(out, len(records), sum(requests.values()), len(pool), suites)
@@ -129,17 +135,15 @@ class SelectionStudy:
 
     def _build(
         self,
-        selector: Selector,
-        matrix: CoverageMatrix,
-        budget: Budget,
+        name: str,
+        tests: list[JavaTest],
+        budget: Budget | CoverBudget,
         draw: int,
-        size: int,
         requests: dict[JavaTest, int],
         out: Path,
     ) -> SmallerSuite:
-        tests = selector.select(matrix, size)
         joined = self._coverage.of(tests)
-        suite = SmallerSuite(selector.name, budget, draw, tests, joined, sum(requests[test] for test in tests))
+        suite = SmallerSuite(name, budget, draw, tests, joined, sum(requests[test] for test in tests))
         logs = self._recording.gather_logs(tests, out / "logs" / suite.name)
         measured = self._restcov.measure(logs, out / "restcov" / suite.name).items()
         if measured != joined:
@@ -201,20 +205,20 @@ class StudyReport:
             f"{self._result['tests']} tests, of which {self._result['pool']} could be picked. "
             "The full suite row counts the items the suite covers. Every other row counts the items that version "
             "loses against the full suite. Requests counts what the kept tests send. "
-            f"Random shows the mean over {self._result['draws']} draws, with the lowest and highest draw.",
+            f"Random shows the mean over {self._result['draws']} draws, with the lowest and highest draw. "
+            "Length matched random keeps the same number of tests at each exact request count as Selected.",
             "",
             "| Budget | Kept | Version | " + " | ".join(columns) + " |",
             "|---|---:|---|" + "---:|" * len(columns),
             f"| 100% | {self._result['tests']} | Full suite | " + " | ".join(full) + " |",
         ]
-        for budget, selected, drawn in self._by_budget():
-            label = Budget(budget).label
+        for label, selected, baselines in self._by_budget():
             lost = [str(selected["lost"][key]) for key in keys] + [str(selected["requests"])]
             lines.append(f"| {label} | {selected['kept']} | Selected | " + " | ".join(lost) + " |")
-            if drawn:
+            for name, drawn in baselines.items():
                 spread = [self._spread([version["lost"][key] for version in drawn]) for key in keys]
                 spread.append(self._spread([version["requests"] for version in drawn]))
-                lines.append(f"| {label} | {selected['kept']} | Random | " + " | ".join(spread) + " |")
+                lines.append(f"| {label} | {selected['kept']} | {name} | " + " | ".join(spread) + " |")
         if self.has_code:
             lines += ["", *self._code_table()]
         return "\n".join(lines) + "\n"
@@ -239,24 +243,25 @@ class StudyReport:
             "Counted by JaCoCo on the server, without the code the server runs on its own when no test runs. The full "
             "suite row counts what all tests cover. Every other row gives the share of that the version keeps. "
             "Classes lost counts the classes where Selected reaches none of the methods the full suite reached, and "
-            "`code-lost.md` names them and every lost method.",
+            "`code-lost.md` names them and every lost method. Rank counts Selected and all draws. "
+            "Rank 1 keeps the most code. Ties share the better rank.",
             "",
             "| Budget | Kept | Version | Lines | Branches | Methods | Classes lost | Methods lost |",
             "|---|---:|---|---:|---:|---:|---:|---:|",
             f"| 100% | {self._result['tests']} | Full suite | " + " | ".join(full) + " |  |  |",
         ]
-        for budget, selected, drawn in self._by_budget():
-            label = Budget(budget).label
+        for label, selected, baselines in self._by_budget():
             code = CodeKept.from_dict(selected["code"])
             kept = [f"{code.share(kind):.1%}" for kind in CodeKept.KINDS]
             kept += [str(len(code.lost_classes)), str(len(code.lost_methods))]
             lines.append(f"| {label} | {selected['kept']} | Selected | " + " | ".join(kept) + " |")
-            if drawn:
-                shares = [
-                    [CodeKept.from_dict(version["code"]).share(kind) for version in drawn] for kind in CodeKept.KINDS
+            for name, drawn in baselines.items():
+                codes = [CodeKept.from_dict(version["code"]) for version in drawn]
+                spread = [
+                    self._share_spread([draw.share(kind) for draw in codes], code.share(kind))
+                    for kind in CodeKept.KINDS
                 ]
-                spread = [self._share_spread(values) for values in shares]
-                lines.append(f"| {label} | {selected['kept']} | Random | " + " | ".join(spread) + " |  |  |")
+                lines.append(f"| {label} | {selected['kept']} | {name} | " + " | ".join(spread) + " |  |  |")
         return lines
 
     def code_lost(self) -> str:
@@ -266,10 +271,10 @@ class StudyReport:
             The list as Markdown.
         """
         lines = ["# Server code Selected lost", ""]
-        for budget, selected, _ in self._by_budget():
+        for label, selected, _ in self._by_budget():
             code = CodeKept.from_dict(selected["code"])
             lines += [
-                f"## {Budget(budget).label}, {selected['kept']} tests",
+                f"## {label}, {selected['kept']} tests",
                 "",
                 f"Classes that lost every method the full suite reached: {len(code.lost_classes)}. "
                 f"Methods no longer reached: {len(code.lost_methods)}.",
@@ -285,18 +290,38 @@ class StudyReport:
             ]
         return "\n".join(lines)
 
-    def _by_budget(self) -> list[tuple[float, dict[str, Any], list[dict[str, Any]]]]:
+    def _by_budget(self) -> list[tuple[str, dict[str, Any], dict[str, list[dict[str, Any]]]]]:
+        """Group each Selected suite with the comparison draws at its budget.
+
+        Returns:
+            Budget labels and versions in order of decreasing suite size.
+        """
         versions = self._result["versions"]
         found = []
-        for budget in sorted({version["budget"] for version in versions}, reverse=True):
-            mine = [version for version in versions if version["budget"] == budget]
-            selected = next(version for version in mine if version["version"] == "selected")
-            found.append((budget, selected, [version for version in mine if version["version"] == "random"]))
+        for selected in sorted(
+            (v for v in versions if v["version"] == "selected"),
+            key=lambda v: (v["kept"], 0 if v["budget"] == "cover" else v["budget"]),
+            reverse=True,
+        ):
+            budget = selected["budget"]
+            label = "cover" if budget == "cover" else Budget(budget).label
+            baselines: dict[str, list[dict[str, Any]]] = {}
+            for version in versions:
+                if version["budget"] == budget and version["version"] != "selected":
+                    name = version["version"].replace("-", " ").capitalize()
+                    baselines.setdefault(name, []).append(version)
+            found.append((label, selected, baselines))
         return found
 
     @staticmethod
-    def _share_spread(values: list[float]) -> str:
-        return f"{statistics.mean(values):.1%} ({min(values):.1%}, {max(values):.1%})"
+    def _share_spread(values: list[float], selected: float) -> str:
+        """Compare the unrounded shares so close draws keep their true rank.
+
+        Returns:
+            The mean, extremes and rank of Selected within this baseline.
+        """
+        rank = 1 + sum(value > selected for value in values)
+        return f"{statistics.mean(values):.1%} ({min(values):.1%}, {max(values):.1%}), rank {rank}/{len(values) + 1}"
 
     @staticmethod
     def _spread(values: list[int]) -> str:

@@ -46,6 +46,7 @@ def test_report_shows_full_selected_and_random_rows() -> None:
 
 
 def test_passing_only_sizes_budgets_from_the_pool(tmp_path: Path) -> None:
+    """Requirement: Each comparison uses the eligible pool."""
     recording = Recording(tmp_path / "rec")
     outcomes = {"p1": Outcome.PASSED, "p2": Outcome.PASSED, "f1": Outcome.FAILED, "f2": Outcome.FAILED}
     for name, outcome in outcomes.items():
@@ -58,7 +59,7 @@ def test_passing_only_sizes_budgets_from_the_pool(tmp_path: Path) -> None:
 
     # Half of the 2 passing tests is 1. Sizing from all 4 records would keep the whole pool.
     suites = study.run(tmp_path / "selection")
-    assert [len(suite.tests) for suite in suites] == [1, 1, 1]
+    assert [len(suite.tests) for suite in suites] == [1] * 5
     assert all(test.method.startswith("p") for suite in suites for test in suite.tests)
 
 
@@ -74,6 +75,7 @@ def _code(lines: int, lost: tuple[str, ...] = (), classes: tuple[str, ...] = ())
 
 
 def test_report_adds_the_server_code_each_version_keeps_and_lists_what_selected_lost() -> None:
+    """Requirement: Each code metric ranks Selected against the draws and gives ties the same rank."""
     result = {
         "tests": 4,
         "requests": 9,
@@ -98,7 +100,10 @@ def test_report_adds_the_server_code_each_version_keeps_and_lists_what_selected_
     lines = report.markdown().splitlines()
     assert "| 100% | 4 | Full suite | 100 | 4 | 2 |  |  |" in lines
     assert "| 50% | 2 | Selected | 90.0% | 50.0% | 50.0% | 1 | 1 |" in lines
-    assert "| 50% | 2 | Random | 74.0% (60.0%, 100.0%) | 50.0% (50.0%, 50.0%) | 50.0% (50.0%, 50.0%) |  |  |" in lines
+    assert (
+        "| 50% | 2 | Random | 74.0% (60.0%, 100.0%), rank 2/4 | "
+        "50.0% (50.0%, 50.0%), rank 1/4 | 50.0% (50.0%, 50.0%), rank 1/4 |  |  |"
+    ) in lines
     lost = report.code_lost()
     assert "Classes that lost every method the full suite reached: 1. Methods no longer reached: 1." in lost
     assert "### Classes\n\n* `a.B`\n\n### Methods\n\n* `a.B.x()V`\n" in lost
@@ -133,6 +138,7 @@ class FakeRecordingCode:
 
 
 def test_the_study_counts_every_smaller_suite_in_one_go_and_lists_only_selected(tmp_path: Path) -> None:
+    """Requirement: Every version gets code counts and only Selected lists lost methods."""
     recording = Recording(tmp_path / "rec")
     for name in ("a", "b", "c", "d"):
         request = HttpRequest("GET", f"/v2/{name}", Headers(), Body())
@@ -146,10 +152,16 @@ def test_the_study_counts_every_smaller_suite_in_one_go_and_lists_only_selected(
 
     assert code.asked is not None
     versions, reference, listed = code.asked
-    assert sorted(versions) == ["random-50-1", "random-50-2", "selected-50-0"]
+    assert sorted(versions) == [
+        "length-matched-random-50-1",
+        "length-matched-random-50-2",
+        "random-50-1",
+        "random-50-2",
+        "selected-50-0",
+    ]
     assert len(reference) == 4
     assert listed == frozenset({"selected-50-0"})
-    assert [suite.code.share("lines") for suite in suites if suite.code] == [0.5, 0.5, 0.5]
+    assert [suite.code.share("lines") for suite in suites if suite.code] == [0.5] * 5
     assert (tmp_path / "selection" / "code-lost.md").exists()
 
     # A later run without code coverage must not leave the old list behind.

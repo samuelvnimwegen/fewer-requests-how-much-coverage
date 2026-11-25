@@ -39,29 +39,31 @@ def restcov(monkeypatch: pytest.MonkeyPatch) -> tuple[FakeRestCov, list[tuple[Pa
 def test_select_measures_the_suite_once_then_reuses_the_saved_coverage(
     tmp_path: Path, restcov: tuple[FakeRestCov, list[tuple[Path, Path]]]
 ) -> None:
+    """Requirement: A second study reuses current coverage."""
     fake, _ = restcov
     recording = _recording(tmp_path / "rec")
     args = ["select", "--recording", str(recording.folder), "--restcov", "restcov.py", "--budgets", "50"]
     args += ["--draws", "2"]
 
-    # A cache miss measures 4 single tests and the whole suite, then 1 selected and 2 random versions.
+    # A cache miss measures 4 single tests and the whole suite, then Selected and 2 draws of each baseline.
     cli.main(args)
-    assert len(fake.measured) == 8
+    assert len(fake.measured) == 10
     assert (recording.folder / "coverage" / "coverage.json").exists()
     result = json.loads((recording.folder / "selection" / "selection.json").read_text())
     assert {version["budget"] for version in result["versions"]} == {0.5}
     assert {version["kept"] for version in result["versions"]} == {2}
 
-    # A cache hit only measures the 3 smaller versions again.
+    # A cache hit only measures the 5 smaller versions again.
     fake.measured.clear()
     cli.main(args)
     assert all(recording.folder / "selection" in logs.parents for logs in fake.measured)
-    assert len(fake.measured) == 3
+    assert len(fake.measured) == 5
 
 
 def test_select_measures_again_when_the_recording_changed(
     tmp_path: Path, restcov: tuple[FakeRestCov, list[tuple[Path, Path]]]
 ) -> None:
+    """Requirement: Changing a recording replaces its saved coverage."""
     fake, _ = restcov
     recording = _recording(tmp_path / "rec")
     args = ["select", "--recording", str(recording.folder), "--restcov", "restcov.py", "--budgets", "50"]
@@ -69,12 +71,12 @@ def test_select_measures_again_when_the_recording_changed(
     cli.main(args)
     saved = recording.folder / "coverage" / "coverage.json"
 
-    # A new test: 5 single tests, the whole suite and 3 versions.
+    # A new test: 5 single tests, the whole suite and 5 versions.
     exchange = Exchange(HttpRequest("GET", "/v2/e", Headers(), Body()), HttpResponse(200, "OK", Headers(), Body()))
     recording.save(RecordedTest(JavaTest("suite.Api", "e"), Outcome.PASSED, 1.0, [exchange]))
     fake.measured.clear()
     cli.main(args)
-    assert len(fake.measured) == 9
+    assert len(fake.measured) == 11
     assert json.loads((recording.folder / "selection" / "selection.json").read_text())["tests"] == 5
 
     # The same test recorded again. The saved file is pushed back in time, so the order doesn't hang on the clock.
@@ -82,7 +84,7 @@ def test_select_measures_again_when_the_recording_changed(
     os.utime(saved, (0, 0))
     fake.measured.clear()
     cli.main(args)
-    assert len(fake.measured) == 9
+    assert len(fake.measured) == 11
     assert json.loads(saved.read_text())["tests"]["suite.Api.a"] == [["path", "GET /v2/e HTTP/1.1"]]
 
 
@@ -511,3 +513,35 @@ def test_every_command_on_a_recording_with_code_coverage_checks_the_helper_first
     args = cli.argparse.Namespace(jacoco=_jacoco_folder(tmp_path))
     assert cli.JaCoCoOption.recording_code(args, recording) is not None
     assert checked == [True]
+
+
+def test_cover_and_percentage_use_the_same_passing_pool(
+    tmp_path: Path, restcov: tuple[FakeRestCov, list[tuple[Path, Path]]]
+) -> None:
+    """Requirement: Cover keeps the fewest eligible tests for all reachable items alongside percentage budgets."""
+    recording = _recording(tmp_path / "rec")
+    first = recording.records()[0]
+    recording.save(RecordedTest(JavaTest("suite.Api", "duplicate"), Outcome.PASSED, 1.0, first.exchanges))
+    failed = Exchange(HttpRequest("GET", "/failed", Headers(), Body()), HttpResponse(500, "", Headers(), Body()))
+    recording.save(RecordedTest(JavaTest("suite.Api", "failed"), Outcome.FAILED, 1.0, [failed]))
+    cli.main(
+        [
+            "select",
+            "--recording",
+            str(recording.folder),
+            "--restcov",
+            "restcov.py",
+            "--passing-only",
+            "--budgets",
+            "cover",
+            "50",
+            "--draws",
+            "2",
+        ]
+    )
+    versions = json.loads((recording.folder / "selection" / "selection.json").read_text())["versions"]
+    assert [(v["budget"], v["kept"], v["lost"]["all"]) for v in versions if v["version"] == "selected"] == [
+        ("cover", 4, 1),
+        (0.5, 3, 2),
+    ]
+    assert all(v["kept"] == (4 if v["budget"] == "cover" else 3) for v in versions)
