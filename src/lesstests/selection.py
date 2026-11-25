@@ -6,7 +6,7 @@ from decimal import Decimal
 from typing import Protocol
 
 import numpy as np
-from scipy.optimize import Bounds, LinearConstraint, milp
+from scipy.optimize import Bounds, LinearConstraint, OptimizeResult, milp
 from scipy.sparse import csr_array, lil_array
 
 from lesstests.coverage import CoverageItem, CoverageSet, SuiteCoverage
@@ -120,12 +120,11 @@ class CoverageSelector:
             ranked = sorted(zip(matrix.requests, matrix.tests, strict=True))
             return sorted(test for _, test in ranked[:size])
         tests, items = len(matrix.tests), len(matrix.items)
-        constraints = self._constraints(matrix, size)
+        constraints = self.constraints(matrix.reaches, items, size)
         integrality = np.concatenate([np.ones(tests), np.zeros(items)])
         bounds = Bounds(0, 1)
 
-        most_items = np.concatenate([np.zeros(tests), -np.ones(items)])
-        first = milp(most_items, constraints=constraints, integrality=integrality, bounds=bounds)
+        first = self.maximum(tests, items, constraints)
         if not first.success:
             raise RuntimeError(f"The coverage program failed: {first.message}")
         reachable = round(-first.fun)
@@ -140,15 +139,32 @@ class CoverageSelector:
         return sorted(test for test, chosen in zip(matrix.tests, second.x[:tests], strict=True) if chosen > 0.5)
 
     @staticmethod
-    def _constraints(matrix: CoverageMatrix, size: int) -> list[LinearConstraint]:
+    def maximum(
+        tests: int, items: int, constraints: list[LinearConstraint], seconds: float | None = None
+    ) -> OptimizeResult:
+        """Maximise the number of items reached.
+
+        Returns:
+            The first solve before breaking ties by request count.
+        """
+        return milp(
+            np.r_[np.zeros(tests), -np.ones(items)],
+            constraints=constraints,
+            integrality=np.r_[np.ones(tests), np.zeros(items)],
+            bounds=Bounds(0, 1),
+            options={"time_limit": seconds, "mip_rel_gap": 0.0} if seconds is not None else None,
+        )
+
+    @staticmethod
+    def constraints(reaches: list[list[int]], items: int, size: int) -> list[LinearConstraint]:
         """Item i counts only when a picked test reaches it, and exactly `size` tests are picked.
 
         Returns:
             The two constraint blocks.
         """
-        tests, items = len(matrix.tests), len(matrix.items)
+        tests = len(reaches)
         reach = lil_array((items, tests + items))
-        for test, reached in enumerate(matrix.reaches):
+        for test, reached in enumerate(reaches):
             for item in reached:
                 reach[item, test] = -1
         for item in range(items):
@@ -253,7 +269,7 @@ class SmallestCover:
 
         # The group indicators are whole numbers too. A fraction inside the solver's tolerance would count as an item.
         whole = np.ones(variables)
-        fewest_tests = milp(count, constraints=constraints, integrality=whole, bounds=bounds, options=options)
+        fewest_tests = self.minimum(count, constraints, options)
         if not fewest_tests.success:
             raise RuntimeError(f"The cover program failed: {fewest_tests.message}")
         size = round(fewest_tests.fun)
@@ -263,3 +279,16 @@ class SmallestCover:
         if not cheapest.success:
             raise RuntimeError(f"The request program failed: {cheapest.message}")
         return [test for test, chosen in zip(tests, cheapest.x[: len(tests)], strict=True) if chosen > 0.5]
+
+    @staticmethod
+    def minimum(
+        count: np.ndarray, constraints: list[LinearConstraint], options: dict[str, float] | None
+    ) -> OptimizeResult:
+        """Find the fewest tests satisfying the cover.
+
+        Returns:
+            The size solve before breaking ties by request count.
+        """
+        return milp(
+            count, constraints=constraints, integrality=np.ones(len(count)), bounds=Bounds(0, 1), options=options
+        )
