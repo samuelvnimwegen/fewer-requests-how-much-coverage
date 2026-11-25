@@ -545,3 +545,39 @@ def test_cover_and_percentage_use_the_same_passing_pool(
         (0.5, 3, 2),
     ]
     assert all(v["kept"] == (4 if v["budget"] == "cover" else 3) for v in versions)
+
+
+@pytest.mark.parametrize("budgets", [[], ["--budgets", "75", "50", "25"], ["--budgets", "cover", "75", "50", "25"]])
+def test_percentage_budgets_keep_their_selected_and_random_tests(
+    tmp_path: Path, restcov: tuple[FakeRestCov, list[tuple[Path, Path]]], budgets: list[str]
+) -> None:
+    """Requirement: Percentage budgets keep the same Selected and random test IDs when cover is added."""
+    recording = Recording(tmp_path / "rec")
+    recording.write_meta({"spec": str(tmp_path / "spec.json")})
+    for name, paths in (("d", 1), ("c", 2), ("b", 3), ("a", 4)):
+        exchanges = [
+            Exchange(HttpRequest("GET", f"/{name}/{i}", Headers(), Body()), HttpResponse(200, "OK", Headers(), Body()))
+            for i in range(paths)
+        ]
+        recording.save(RecordedTest(JavaTest("suite.Api", name), Outcome.PASSED, 1.0, exchanges))
+    cli.main(["select", "--recording", str(recording.folder), "--restcov", "restcov.py", "--draws", "2", *budgets])
+    versions = json.loads((recording.folder / "selection" / "selection.json").read_text())["versions"]
+    rows = [
+        (v["budget"], v["version"], v["draw"], v["tests"])
+        for v in versions
+        if v["budget"] != "cover" and v["version"] in ("selected", "random")
+    ]
+    expected = [
+        (0.75, "selected", 0, "abc"),
+        (0.75, "random", 1, "bcd"),
+        (0.75, "random", 2, "acd"),
+        (0.5, "selected", 0, "ab"),
+        (0.5, "random", 1, "cd"),
+        (0.5, "random", 2, "bc"),
+        (0.25, "selected", 0, "a"),
+        (0.25, "random", 1, "a"),
+        (0.25, "random", 2, "a"),
+    ]
+    assert rows == [
+        (share, kind, draw, [f"suite.Api.{name}" for name in names]) for share, kind, draw, names in expected
+    ]

@@ -5,7 +5,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from lesstests.baselines import Baseline, LengthMatchedRandom, UniformRandom
+from lesstests.baselines import DEFAULT_BASELINES, Baseline
 from lesstests.code_coverage import RecordingCode
 from lesstests.coverage import CoverageSet, Criterion, RestCov, SuiteCoverage
 from lesstests.jacoco import CodeKept
@@ -76,18 +76,21 @@ class SelectionStudy:
         seed: int,
         passing_only: bool = False,
         code: RecordingCode | None = None,
-        baselines: Sequence[Baseline] = (UniformRandom(), LengthMatchedRandom()),
+        baselines: Sequence[Baseline] = DEFAULT_BASELINES,
     ) -> None:
-        """Set up the study. With `passing_only`, both selectors pick only from tests that passed alone.
+        """Set up the study. With `passing_only`, every suite uses tests that passed alone.
 
         With `code`, every smaller suite also gets the server code it keeps, and Selected the methods it lost.
 
         Raises:
-            ValueError: If two budgets share a label, since they would write to the same folders.
+            ValueError: If budgets share a label, baselines share a name or a baseline uses the reserved name selected.
         """
         labels = [budget.label for budget in budgets]
         if len(set(labels)) != len(labels):
             raise ValueError(f"Every budget needs its own label, got {', '.join(labels)}")
+        names = [baseline.name for baseline in baselines]
+        if "selected" in names or len(set(names)) != len(names):
+            raise ValueError("Baseline names must be unique and cannot be selected")
         self._recording = recording
         self._coverage = coverage
         self._restcov = restcov
@@ -96,7 +99,7 @@ class SelectionStudy:
         self._seed = seed
         self._passing_only = passing_only
         self._code = code
-        self._baselines = baselines
+        self._baselines = tuple(baselines)
 
     def run(self, out: Path) -> list[SmallerSuite]:
         """Build every smaller suite, measure it and write the results to `out`.
@@ -215,7 +218,8 @@ class StudyReport:
         for label, selected, baselines in self._by_budget():
             lost = [str(selected["lost"][key]) for key in keys] + [str(selected["requests"])]
             lines.append(f"| {label} | {selected['kept']} | Selected | " + " | ".join(lost) + " |")
-            for name, drawn in baselines.items():
+            for baseline, drawn in baselines.items():
+                name = self._baseline_label(baseline)
                 spread = [self._spread([version["lost"][key] for version in drawn]) for key in keys]
                 spread.append(self._spread([version["requests"] for version in drawn]))
                 lines.append(f"| {label} | {selected['kept']} | {name} | " + " | ".join(spread) + " |")
@@ -255,7 +259,8 @@ class StudyReport:
             kept = [f"{code.share(kind):.1%}" for kind in CodeKept.KINDS]
             kept += [str(len(code.lost_classes)), str(len(code.lost_methods))]
             lines.append(f"| {label} | {selected['kept']} | Selected | " + " | ".join(kept) + " |")
-            for name, drawn in baselines.items():
+            for baseline, drawn in baselines.items():
+                name = self._baseline_label(baseline)
                 codes = [CodeKept.from_dict(version["code"]) for version in drawn]
                 spread = [
                     self._share_spread([draw.share(kind) for draw in codes], code.share(kind))
@@ -308,10 +313,18 @@ class StudyReport:
             baselines: dict[str, list[dict[str, Any]]] = {}
             for version in versions:
                 if version["budget"] == budget and version["version"] != "selected":
-                    name = version["version"].replace("-", " ").capitalize()
-                    baselines.setdefault(name, []).append(version)
+                    baselines.setdefault(version["version"], []).append(version)
             found.append((label, selected, baselines))
         return found
+
+    @staticmethod
+    def _baseline_label(name: str) -> str:
+        """Keep custom names recognisable in the report.
+
+        Returns:
+            The display name of the baseline.
+        """
+        return {"random": "Random", "length-matched-random": "Length matched random"}.get(name, name)
 
     @staticmethod
     def _share_spread(values: list[float], selected: float) -> str:

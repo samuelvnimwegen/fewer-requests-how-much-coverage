@@ -1,7 +1,7 @@
 import math
 import random
 from dataclasses import dataclass
-from typing import Literal, Protocol
+from typing import Literal
 
 import numpy as np
 from scipy.optimize import Bounds, LinearConstraint, milp
@@ -75,20 +75,6 @@ class CoverageMatrix:
         self.items: list[CoverageItem] = sorted({item for test in self.tests for item in coverage.per_test[test].items})
         index = {item: number for number, item in enumerate(self.items)}
         self.reaches = [sorted(index[item] for item in coverage.per_test[test].items) for test in self.tests]
-
-
-class Selector(Protocol):
-    """Picks a given number of tests from a matrix."""
-
-    name: str
-
-    def select(self, matrix: CoverageMatrix, size: int) -> list[JavaTest]:
-        """Pick tests.
-
-        Returns:
-            The picked tests.
-        """
-        ...
 
 
 class RandomSelector:
@@ -215,13 +201,18 @@ class SmallestCover:
         integrality = np.ones(len(tests))
         bounds = Bounds(0, 1)
 
-        fewest_tests = milp(np.ones(len(tests)), constraints=[every_item], integrality=integrality, bounds=bounds)
+        options = {"mip_rel_gap": 0.0}
+        fewest_tests = milp(
+            np.ones(len(tests)), constraints=[every_item], integrality=integrality, bounds=bounds, options=options
+        )
         if not fewest_tests.success:
             raise RuntimeError(f"The cover program failed: {fewest_tests.message}")
         size = round(fewest_tests.fun)
         keep_size = LinearConstraint(np.ones((1, len(tests))), size, size)
         cost = np.asarray([requests[test] for test in tests], dtype=float)
-        cheapest = milp(cost, constraints=[every_item, keep_size], integrality=integrality, bounds=bounds)
+        cheapest = milp(
+            cost, constraints=[every_item, keep_size], integrality=integrality, bounds=bounds, options=options
+        )
         if not cheapest.success:
             raise RuntimeError(f"The request program failed: {cheapest.message}")
         return sorted(test for test, chosen in zip(tests, cheapest.x, strict=True) if chosen > 0.5)

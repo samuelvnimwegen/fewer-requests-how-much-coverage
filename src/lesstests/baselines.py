@@ -54,3 +54,6 @@ class LengthMatchedRandom:
                 counts[length] += 1
         rng = random.Random(seed)
         return sorted(test for length, count in counts.items() for test in rng.sample(groups[length], count))
+
+
+DEFAULT_BASELINES: tuple[Baseline, ...] = (UniformRandom(), LengthMatchedRandom())
