@@ -72,6 +72,7 @@ public final class LesstestsCoverage {
         }
         Counts totals = coverage.totals();
         try (PrintWriter out = new PrintWriter(Files.newBufferedWriter(Path.of(args[2]), StandardCharsets.UTF_8))) {
+            Map<String, Integer> lineIds = new HashMap<>();
             for (Group group : job.groups) {
                 Map<Long, Probes> joined = coverage.join(group.files);
                 if (group.masked) {
@@ -81,6 +82,19 @@ public final class LesstestsCoverage {
                 out.println(String.join("\t", "group", group.name, Counts.of(bundle).with(totals)));
                 for (String name : coverage.problems(joined)) {
                     out.println(String.join("\t", name, group.name));
+                }
+                if (group.lines) {
+                    out.print("lines\t" + group.name);
+                    bundle.getPackages().forEach(pkg -> pkg.getSourceFiles().forEach(source -> {
+                        String file = pkg.getName() + "/" + source.getName() + ":";
+                        for (int line = source.getFirstLine(); line >= 0 && line <= source.getLastLine(); line++) {
+                            if (source.getLine(line).getInstructionCounter().getCoveredCount() > 0) {
+                                int id = lineIds.computeIfAbsent(file + line, key -> lineIds.size());
+                                out.print("\t" + id);
+                            }
+                        }
+                    }));
+                    out.println();
                 }
                 if (group.methods) {
                     for (String method : coveredMethods(bundle)) {
@@ -279,7 +293,7 @@ public final class LesstestsCoverage {
         }
     }
 
-    private record Group(String name, boolean masked, boolean methods, List<Path> files) {
+    private record Group(String name, boolean masked, boolean methods, boolean lines, List<Path> files) {
     }
 
     /** A job file: "classes PATH", "package PREFIX", "idle PATH", "group NAME MASKED METHODS" then "exec PATH". */
@@ -300,7 +314,8 @@ public final class LesstestsCoverage {
                     case "package" -> prefix = parts[1];
                     case "idle" -> idle = Path.of(parts[1]);
                     case "group" -> groups.add(
-                        new Group(parts[1], parts[2].equals("1"), parts[3].equals("1"), new ArrayList<>()));
+                        new Group(parts[1], parts[2].equals("1"), parts[3].equals("1"),
+                            parts.length > 4 && parts[4].equals("1"), new ArrayList<>()));
                     case "exec" -> groups.get(groups.size() - 1).files.add(Path.of(parts[1]));
                     default -> throw new IllegalArgumentException("Unknown job line: " + line);
                 }
