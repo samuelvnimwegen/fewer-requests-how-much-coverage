@@ -1,7 +1,7 @@
 import math
 import random
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Literal, Protocol
 
 import numpy as np
 from scipy.optimize import Bounds, LinearConstraint, milp
@@ -26,6 +26,14 @@ class Budget:
         if not 0 < self.share <= 1:
             raise ValueError(f"A budget keeps more than 0% and at most 100% of the tests, not {self.share * 100}%")
 
+    def pick(self, matrix: "CoverageMatrix", coverage: SuiteCoverage, requests: dict[JavaTest, int]) -> list[JavaTest]:
+        """Pick the suite at this share of the eligible pool.
+
+        Returns:
+            The Selected tests.
+        """
+        return CoverageSelector().select(matrix, self.size(len(matrix.tests)))
+
     def size(self, tests: int) -> int:
         """Turn the share into a number of tests, rounding halves up and keeping at least one.
 
@@ -39,6 +47,22 @@ class Budget:
     def label(self) -> str:
         """The share as a percentage, like `75%` or `12.5%`."""
         return f"{self.share * 100:g}%"
+
+
+class CoverBudget:
+    """Keep the smallest suite that covers every item in the eligible pool."""
+
+    label = "cover"
+    share: Literal["cover"] = "cover"
+
+    def pick(self, matrix: "CoverageMatrix", coverage: SuiteCoverage, requests: dict[JavaTest, int]) -> list[JavaTest]:
+        """Cover the items the eligible tests can reach.
+
+        Returns:
+            The smallest cover, breaking ties by the fewest requests.
+        """
+        candidates = {test: coverage.per_test[test] for test in matrix.tests}
+        return SmallestCover().select(candidates, requests, coverage.of(matrix.tests))
 
 
 class CoverageMatrix:
@@ -85,13 +109,14 @@ class RandomSelector:
         return sorted(self._random.sample(matrix.tests, min(size, len(matrix.tests))))
 
     @staticmethod
-    def seed_for(base: int, budget: Budget, draw: int) -> int:
+    def seed_for(base: int, budget: Budget | CoverBudget, draw: int) -> int:
         """Give every budget and draw its own seed, so adding a budget leaves the other draws unchanged.
 
         Returns:
             The seed.
         """
-        return base * 1_000_003 + round(budget.share * 1000) * 1_009 + draw
+        key = -1 if budget.share == "cover" else round(budget.share * 1000)
+        return base * 1_000_003 + key * 1_009 + draw
 
 
 class CoverageSelector:
