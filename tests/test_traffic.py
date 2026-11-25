@@ -24,7 +24,13 @@ def _record(name: str, *exchanges: Exchange) -> RecordedTest:
 
 def _traffic(records: list[RecordedTest], *families: str) -> TrafficCoverage:
     paths = ["/orders/new", "/orders/{id}"]
-    full = CoverageSet(CoverageItem(Criterion.PATH, path) for path in paths)
+    operations = ["GET /orders/{id}", "POST /orders/new", "PUT /orders/new"]
+    full = CoverageSet(
+        [
+            *(CoverageItem(Criterion.PATH, path) for path in paths),
+            *(CoverageItem(Criterion.OPERATION, op) for op in operations),
+        ]
+    )
     return TrafficCoverage.collect(records, ApiDescription([], ["/api"]), full, families)
 
 
@@ -194,3 +200,26 @@ def test_response_values_bound_short_scalars_within_each_status() -> None:
     }
     assert families["response_fields"][op, "400", ".edge"] == {rows[-1].test}
     assert families["request_values"][op, ".many", "12"] == {rows[12].test}
+
+
+def test_unresolved_post_routes_have_separate_values_and_pairs() -> None:
+    """Requirement: Unresolved routes stay distinct and only matched operations supply path parameters."""
+    first = _exchange("GET", "/api/orders/1")
+    a = _record("a", first, _exchange("POST", "/api/orders/login?command=start&command=", result={"state": "a"}))
+    b = _record("b", first, _exchange("POST", "/api/orders/logout", result={"state": "b"}))
+    c = _record("c", first, _exchange("POST", "/api/elsewhere", result={"state": "c"}))
+    d = _record("d", first, _exchange("POST", "/api/unknown", result={"state": "d"}))
+    families = _traffic([a, b, c, d], "commands", "response_values", "parameter_values", "operation_pairs").witnesses
+    assert families["commands"] == {("POST /orders/{id}", "start"): {a.test}}
+    assert families["response_values"] == {}
+    assert families["parameter_values"] == {
+        ("GET /orders/{id}", "path", "id", "1"): {a.test, b.test, c.test, d.test},
+        ("unresolved POST /orders/login", "query", "command", "start"): {a.test},
+        ("unresolved POST /orders/login", "query", "command", ""): {a.test},
+    }
+    assert families["operation_pairs"] == {
+        ("GET /orders/{id}", "unresolved POST /orders/login"): {a.test},
+        ("GET /orders/{id}", "unresolved POST /orders/logout"): {b.test},
+        ("GET /orders/{id}", "unresolved POST /elsewhere"): {c.test},
+        ("GET /orders/{id}", "unresolved POST /unknown"): {d.test},
+    }

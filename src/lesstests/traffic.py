@@ -5,12 +5,12 @@ import json
 import re
 import zlib
 from collections import defaultdict
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterator
 from dataclasses import dataclass
 from functools import cached_property
 from itertools import pairwise
 from typing import Any, Protocol, Self
-from urllib.parse import parse_qs, parse_qsl, unquote, urlsplit
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 from lesstests.api import ApiDescription
 from lesstests.coverage import CoverageSet, Criterion
@@ -26,10 +26,13 @@ class Request:
 
     _escape = str.maketrans({char: "\\" + char for char in ".[]\\"})
 
-    def __init__(self, exchange: Exchange, operation: str, path_values: tuple[tuple[str, str], ...] = ()) -> None:
+    def __init__(
+        self, exchange: Exchange, operation: str, route: str, path_values: tuple[tuple[str, str], ...]
+    ) -> None:
         """Keep the exchange and its operation name."""
         self.exchange = exchange
         self.operation = operation
+        self.route = route
         self.path_values = path_values
 
     @staticmethod
@@ -48,14 +51,42 @@ class Request:
             return None
 
     @cached_property
+    def query(self) -> list[tuple[str, str]]:
+        """Query arguments in recording order.
+
+        Returns:
+        All query pairs, including blank values.
+        """
+        return parse_qsl(urlsplit(self.exchange.request.target).query, keep_blank_values=True)
+
+    @cached_property
+    def request_body(self) -> Any:
+        """JSON sent by the client.
+
+        Returns:
+        The decoded request body.
+        """
+        request = self.exchange.request
+        return self.body(request.body, request.headers)
+
+    @cached_property
+    def response_body(self) -> Any:
+        """JSON returned by the server.
+
+        Returns:
+        The decoded response body.
+        """
+        response = self.exchange.response
+        return self.body(response.body, response.headers)
+
+    @cached_property
     def fields(self) -> list[tuple[str, Any]]:
         """Read leaf values with array positions folded.
 
         Returns:
             The field paths and their values.
         """
-        request = self.exchange.request
-        return list(self._leaves(self.body(request.body, request.headers), ""))
+        return list(self._leaves(self.request_body, ""))
 
     @cached_property
     def response_fields(self) -> list[tuple[str, Any]]:
@@ -64,8 +95,7 @@ class Request:
         Returns:
             Field paths and values.
         """
-        response = self.exchange.response
-        return list(self._leaves(self.body(response.body, response.headers), ""))
+        return list(self._leaves(self.response_body, ""))
 
     @classmethod
     def _leaves(cls, value: Any, path: str) -> Iterator[tuple[str, Any]]:
@@ -98,8 +128,31 @@ class Family(Protocol):
         """
         ...
 
+    def filter(self, witnesses: dict[Item, set[JavaTest]]) -> dict[Item, set[JavaTest]]:
+        """Keep all items by default.
 
-class Commands:
+        Returns:
+        All witnessed items by default.
+        """
+        return witnesses
+
+
+class BoundedValues(Family):
+    """Keep groups with two through twelve distinct values in the suite."""
+
+    def filter(self, witnesses: dict[Item, set[JavaTest]]) -> dict[Item, set[JavaTest]]:
+        """Apply the suite wide value limit.
+
+        Returns:
+        The witnesses of values in qualifying groups.
+        """
+        sizes: dict[Item, int] = defaultdict(int)
+        for item in witnesses:
+            sizes[item[:-1]] += 1
+        return {item: tests for item, tests in witnesses.items() if 2 <= sizes[item[:-1]] <= 12}
+
+
+class Commands(Family):
     """Dispatch values sent in the command query parameter."""
 
     def items(self, requests: list[Request]) -> Iterator[Item]:
@@ -109,12 +162,12 @@ class Commands:
             An operation and command value.
         """
         for request in requests:
-            query = urlsplit(request.exchange.request.target).query
-            for value in parse_qs(query).get("command", []):
-                yield request.operation, value
+            for name, value in request.query:
+                if name == "command" and value:
+                    yield request.operation, value
 
 
-class Fields:
+class Fields(Family):
     """Request body field paths per operation."""
 
     def items(self, requests: list[Request]) -> Iterator[Item]:
@@ -128,7 +181,7 @@ class Fields:
                 yield request.operation, path
 
 
-class Modes:
+class Modes(BoundedValues):
     """Boolean switches and short sets of named choices."""
 
     suffix = re.compile(r"(type|method|strategy(code)?|rule|frequency|calculation|enabled)(\[\])*$", re.I)
@@ -148,20 +201,8 @@ class Modes:
                 ):
                     yield request.operation, path, json.dumps(value)
 
-    @staticmethod
-    def bounded(items: Iterable[Item]) -> set[Item]:
-        """Keep fields with two through twelve different values across the full suite.
 
-        Returns:
-            The accepted mode items.
-        """
-        values: dict[Item, set[Item]] = defaultdict(set)
-        for item in items:
-            values[item[:-1]].add(item)
-        return {item for group in values.values() if 2 <= len(group) <= 12 for item in group}
-
-
-class Readbacks:
+class Readbacks(Family):
     """Fields written on creation and returned by a later read of that resource."""
 
     def items(self, requests: list[Request]) -> Iterator[Item]:
@@ -186,11 +227,11 @@ class Readbacks:
             if req.method in {"PUT", "PATCH", "DELETE"} or (req.method == "POST" and tail.isdigit()):
                 pending.pop(location, None)
             if req.method == "POST" and not tail.isdigit():
-                created = Request.body(res.body, res.headers)
+                created = request.response_body
                 resource = created.get("resourceId") if isinstance(created, dict) else None
                 if type(resource) is int:
                     target = (url.scheme, host, f"{path}/{resource}")
-                    written = Request.body(req.body, req.headers)
+                    written = request.request_body
 
                     # Repeated create identifiers make the source of a later value ambiguous.
                     if target not in seen and isinstance(written, dict):
@@ -199,7 +240,7 @@ class Readbacks:
                         pending.pop(target, None)
                     seen.add(target)
             if req.method == "GET" and location in pending:
-                returned = Request.body(res.body, res.headers)
+                returned = request.response_body
                 if isinstance(returned, dict):
                     collection = "/".join("{}" if part.isdigit() else part for part in parent.split("/"))
                     for key, value in pending[location].items():
@@ -211,7 +252,7 @@ class Readbacks:
                             yield collection, key
 
 
-class ParameterValues:
+class ParameterValues(Family):
     """Query values and values captured by path placeholders."""
 
     def items(self, requests: list[Request]) -> Iterator[Item]:
@@ -221,14 +262,13 @@ class ParameterValues:
             Operation, location, name and value.
         """
         for request in requests:
-            query = urlsplit(request.exchange.request.target).query
-            for name, value in parse_qsl(query, keep_blank_values=True):
-                yield request.operation, "query", name, value
+            for name, value in request.query:
+                yield request.route, "query", name, value
             for name, value in request.path_values:
-                yield request.operation, "path", name, unquote(value)
+                yield request.route, "path", name, unquote(value)
 
 
-class RequestValues:
+class RequestValues(Family):
     """Typed scalar values of request body fields."""
 
     def items(self, requests: list[Request]) -> Iterator[Item]:
@@ -240,10 +280,10 @@ class RequestValues:
         for request in requests:
             for path, value in request.fields:
                 if isinstance(value, (bool, int, float, str)):
-                    yield request.operation, path, json.dumps(value)
+                    yield request.route, path, json.dumps(value)
 
 
-class ResponseFields:
+class ResponseFields(Family):
     """Response leaf paths per operation and status."""
 
     def items(self, requests: list[Request]) -> Iterator[Item]:
@@ -254,10 +294,10 @@ class ResponseFields:
         """
         for request in requests:
             for path, _ in request.response_fields:
-                yield request.operation, str(request.exchange.response.status), path
+                yield request.route, str(request.exchange.response.status), path
 
 
-class ResponseValues:
+class ResponseValues(BoundedValues):
     """Short response values grouped by operation, status and field."""
 
     def items(self, requests: list[Request]) -> Iterator[Item]:
@@ -269,10 +309,10 @@ class ResponseValues:
         for request in requests:
             for path, value in request.response_fields:
                 if isinstance(value, (bool, int, float, str)) and len(str(value)) < 64:
-                    yield request.operation, str(request.exchange.response.status), path, json.dumps(value)
+                    yield request.route, str(request.exchange.response.status), path, json.dumps(value)
 
 
-class OperationPairs:
+class OperationPairs(Family):
     """Consecutive operations within a test."""
 
     def items(self, requests: list[Request]) -> Iterator[Item]:
@@ -282,7 +322,7 @@ class OperationPairs:
             Previous and current operation.
         """
         for previous, current in pairwise(requests):
-            yield previous.operation, current.operation
+            yield previous.route, current.route
 
 
 FAMILIES: dict[str, Family] = {
@@ -323,7 +363,7 @@ class TrafficCoverage:
             (method.upper(), path)
             for method, _, path in (i.key.partition(" ") for i in full.items if i.criterion == Criterion.OPERATION)
         }
-        matched: dict[tuple[str, str], tuple[str, tuple[tuple[str, str], ...]]] = {}
+        matched: dict[tuple[str, str], tuple[str, str, tuple[tuple[str, str], ...]]] = {}
         witnesses: dict[str, dict[Item, set[JavaTest]]] = {name: defaultdict(set) for name in names}
         for record in records:
             requests = []
@@ -333,20 +373,20 @@ class TrafficCoverage:
                 if (method, path) not in matched:
                     fitting = [(p, m) for pattern, p in patterns if (m := pattern.fullmatch(path))]
                     own = [entry for entry in fitting if (method.upper(), entry[0]) in operations]
-                    template, values = "<unmatched>", ()
-                    if fitting:
-                        template, match = (own or fitting)[0]
+                    if own:
+                        template, match = own[0]
+                        route = f"{method} {template}"
                         values = tuple(zip(re.findall(r"\{([^}]+)\}", template), match.groups(), strict=True))
-                    matched[method, path] = (f"{method} {template}", values)
+                    else:
+                        template = fitting[0][0] if fitting else "<unmatched>"
+                        route = f"unresolved {method} {path}"
+                        values = ()
+                    matched[method, path] = (f"{method} {template}", route, values)
                 requests.append(Request(exchange, *matched[method, path]))
             for name in names:
                 for item in FAMILIES[name].items(requests):
                     witnesses[name][item].add(record.test)
-        for name in ("modes", "response_values"):
-            if name in witnesses:
-                family = witnesses[name]
-                witnesses[name] = {item: family[item] for item in Modes.bounded(family)}
-        return cls(witnesses)
+        return cls({name: FAMILIES[name].filter(items) for name, items in witnesses.items()})
 
     def counts(self, tests: list[JavaTest]) -> dict[str, int]:
         """Count distinct covered items in each enabled family.
