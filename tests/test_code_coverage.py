@@ -275,3 +275,17 @@ def test_per_test_methods_drop_idle_probes(tmp_path: Path) -> None:
     code = RecordingCode([recording], FakeJaCoCo(tmp_path), CODE)
     a, b = [record.test for record in recording.records()]
     assert code.methods_by_test([a, b]) == {a: {"A"}, b: {"C"}}
+
+
+def test_external_check_leaves_the_cache_with_the_recording(tmp_path: Path) -> None:
+    """Requirement: An external check uses a current recording cache and only stores its report externally."""
+    recording = _recording(tmp_path, {"a": "line:1"})
+    jacoco = FakeJaCoCo(tmp_path, REPORT.format(counters=_counters((99, 1))))
+    code = RecordingCode([recording], jacoco, CODE)
+    out = tmp_path / "results"
+    assert code.check(out).covered.lines == 1
+    assert not (out / "check.json").exists()
+    assert not (recording.code_folder / "check.json").exists()
+    code.check()
+    object.__setattr__(jacoco, "report_xml", "")
+    assert code.check(out).covered.lines == 1

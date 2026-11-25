@@ -120,7 +120,7 @@ class RecordingCode:
     def check(self, out: Path | None = None) -> CodeCheck:
         """Check the helper against JaCoCo's own report on all dumps of the first recording.
 
-        The result is saved, and checked again once a dump is newer, such as after a resumed recording.
+        Only the recording stores a cached result. A newer dump triggers a fresh check.
 
         Returns:
             The covered counts of all tests without the idle mask, and the classes that ran without a class file.
@@ -133,9 +133,9 @@ class RecordingCode:
             return CodeCheck.from_dict(json.loads(saved.read_text(encoding="utf-8")))
         folder = out or recording.code_folder
         (folder / "check").mkdir(parents=True, exist_ok=True)
-        saved = folder / "check.json"
         checked = self._counter.check(dumps, folder / "check" / "report.xml")
-        saved.write_text(json.dumps(checked.to_dict(), indent=1), encoding="utf-8")
+        if folder == recording.code_folder:
+            saved.write_text(json.dumps(checked.to_dict(), indent=1), encoding="utf-8")
         return checked
 
     def annotate(self, plan: VersionPlan) -> None:
