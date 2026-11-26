@@ -10,6 +10,7 @@ from types import TracebackType
 from typing import Self, cast
 
 from lesstests.exchange import Body, Exchange, Headers, HttpRequest, HttpResponse
+from lesstests.faults import ProxyFault
 from lesstests.java import JvmSettings, MavenProject
 from lesstests.tls import CertificateAuthority
 
@@ -55,6 +56,15 @@ class _LoggingServer(ThreadingHTTPServer):
     def __init__(self, listen: Address, handler: type[BaseHTTPRequestHandler], log: "ExchangeLog") -> None:
         super().__init__((listen.host, listen.port), handler)
         self.log = log
+        self.fault: ProxyFault | None = None
+
+    def response(self, exchange: Exchange) -> HttpResponse:
+        """Apply the configured fault.
+
+        Returns:
+            The response the client receives, including any requested edit.
+        """
+        return self.fault.apply(exchange) if self.fault is not None else exchange.response
 
 
 class _ForwardingHandler(BaseHTTPRequestHandler):
@@ -87,7 +97,7 @@ class _ForwardingHandler(BaseHTTPRequestHandler):
             self._proxy.log.fail(f"{self._label()}: {error}")
             self.send_error(502, "Upstream service unreachable")
             return
-        self._keep(Exchange(request, response))
+        response = self._keep(Exchange(request, response))
 
         # The plain send_response adds its own Server and Date, which would double the upstream ones.
         self.send_response_only(response.status, response.reason)
@@ -120,9 +130,15 @@ class _ForwardingHandler(BaseHTTPRequestHandler):
         """
         return HttpRequest(self.command, self.path, Headers(tuple(self.headers.items())), body)
 
-    def _keep(self, exchange: Exchange) -> None:
-        """Store one finished exchange."""
-        self._proxy.log.add(exchange)
+    def _keep(self, exchange: Exchange) -> HttpResponse:
+        """Store the response the client receives.
+
+        Returns:
+            The response to forward after recording any edit.
+        """
+        response = self._proxy.response(exchange)
+        self._proxy.log.add(Exchange(exchange.request, response))
+        return response
 
     def _connect(self) -> http.client.HTTPConnection:
         """Open a fresh connection to where the request goes.
@@ -240,9 +256,12 @@ class _TunnelHandler(_ForwardingHandler):
             headers = Headers((("Host", self._authority), *headers.pairs))
         return HttpRequest(self.command, self._origin_form(self.path), headers, body)
 
-    def _keep(self, exchange: Exchange) -> None:
-        if self._host.lower() not in self._intercepting.passthrough:
-            self._proxy.log.add(self._intercepting.redactor.apply(exchange))
+    def _keep(self, exchange: Exchange) -> HttpResponse:
+        if self._host.lower() in self._intercepting.passthrough:
+            return exchange.response
+        response = self._proxy.response(exchange)
+        self._proxy.log.add(self._intercepting.redactor.apply(Exchange(exchange.request, response)))
+        return response
 
     def _connect(self) -> http.client.HTTPConnection:
         context = self._intercepting.upstream_context
@@ -361,10 +380,11 @@ class ExchangeLog:
 class Proxy:
     """Runs a logging server in a background thread. Subclasses say which server, a reverse or an intercepting one."""
 
-    def __init__(self, listen: Address) -> None:
+    def __init__(self, listen: Address, fault: ProxyFault | None = None) -> None:
         """Set up the proxy without opening the port yet."""
         self._listen = listen
         self.log = ExchangeLog()
+        self._fault = fault
         self._server: _LoggingServer | None = None
         self._thread: threading.Thread | None = None
 
@@ -379,6 +399,7 @@ class Proxy:
     def start(self) -> None:
         """Open the port and serve in a background thread."""
         self._server = self._make_server()
+        self._server.fault = self._fault
         self._thread = threading.Thread(target=self._server.serve_forever, name="lesstests-proxy", daemon=True)
         self._thread.start()
 
@@ -425,9 +446,11 @@ class RecordingProxy(Proxy):
     Example: the tests call `localhost:8081`, so the proxy listens there and forwards to the service on 8082.
     """
 
-    def __init__(self, listen: Address, upstream: Address, timeout: float = 60.0) -> None:
+    def __init__(
+        self, listen: Address, upstream: Address, timeout: float = 60.0, fault: ProxyFault | None = None
+    ) -> None:
         """Set up the proxy without opening the port yet. `timeout` is how long one answer may take."""
-        super().__init__(listen)
+        super().__init__(listen, fault)
         self._upstream = upstream
         self._timeout = timeout
 
@@ -450,9 +473,10 @@ class InterceptingProxy(Proxy):
         authority: CertificateAuthority,
         passthrough: frozenset[str] = frozenset(),
         upstream_context: ssl.SSLContext | None = None,
+        fault: ProxyFault | None = None,
     ) -> None:
         """Set up the proxy without opening the port yet."""
-        super().__init__(listen)
+        super().__init__(listen, fault)
         self._authority = authority
         self._passthrough = frozenset(host.lower() for host in passthrough)
         self._redactor = Redactor(self.REDACTED_HEADERS)
