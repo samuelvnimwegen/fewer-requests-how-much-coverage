@@ -269,7 +269,10 @@ class FaultSession:
         if confirm and row["verdict"] in CATCHES:
             repeat = self.pair(family, test, confirm=False)
             row["confirmation"] = repeat
-            if repeat["verdict"] != row["verdict"] or repeat.get("failures") != row["failures"]:
+
+            # A message can hold a value of one JVM, like an object hash, so only kind and class must repeat.
+            kinds = [[f[:2] for f in r.get("failures", [])] for r in (repeat, row)]
+            if repeat["verdict"] != row["verdict"] or kinds[0] != kinds[1]:
                 row.update(verdict="unresolved", reason="Catch did not repeat under a passing control")
         return row
 
@@ -303,7 +306,7 @@ class FaultRun:
         tags = SUBJECTS[meta["subject"]].meta().values()
         images = subprocess.check_output(["docker", "image", "inspect", "--format", "{{.Id}}", *tags])
         java = subprocess.check_output(["java", "-version"], stderr=subprocess.STDOUT)
-        names = "JAVA_HOME PATH JAVA_TOOL_OPTIONS JDK_JAVA_OPTIONS DOCKER_HOST DOCKER_CONTEXT"
+        names = "JAVA_HOME JAVA_TOOL_OPTIONS JDK_JAVA_OPTIONS DOCKER_HOST DOCKER_CONTEXT"
         settings = {k: os.getenv(k) for k in names.split()}
         facts = [asdict(self.plan), version("lesstests"), env, settings]
         digest = hashlib.sha256(json.dumps(facts, sort_keys=True).encode() + images + java)
