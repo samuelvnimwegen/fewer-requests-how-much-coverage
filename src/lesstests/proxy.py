@@ -58,14 +58,6 @@ class _LoggingServer(ThreadingHTTPServer):
         self.log = log
         self.fault: ProxyFault | None = None
 
-    def response(self, exchange: Exchange) -> HttpResponse:
-        """Apply the configured fault.
-
-        Returns:
-            The response the client receives, including any requested edit.
-        """
-        return self.fault.apply(exchange) if self.fault is not None else exchange.response
-
 
 class _ForwardingHandler(BaseHTTPRequestHandler):
     """Passes one request on to the upstream and hands the exchange to the proxy."""
@@ -80,6 +72,8 @@ class _ForwardingHandler(BaseHTTPRequestHandler):
         """Keep the console quiet, the recording holds every exchange."""
 
     def _forward(self) -> None:
+        # A slow upstream response still belongs to the test that sent the request.
+        fault = self._proxy.fault
         try:
             body = self._read_body()
         except (OSError, ValueError) as error:
@@ -97,7 +91,7 @@ class _ForwardingHandler(BaseHTTPRequestHandler):
             self._proxy.log.fail(f"{self._label()}: {error}")
             self.send_error(502, "Upstream service unreachable")
             return
-        response = self._keep(Exchange(request, response))
+        response = self._keep(Exchange(request, response), fault)
 
         # The plain send_response adds its own Server and Date, which would double the upstream ones.
         self.send_response_only(response.status, response.reason)
@@ -130,13 +124,13 @@ class _ForwardingHandler(BaseHTTPRequestHandler):
         """
         return HttpRequest(self.command, self.path, Headers(tuple(self.headers.items())), body)
 
-    def _keep(self, exchange: Exchange) -> HttpResponse:
+    def _keep(self, exchange: Exchange, fault: ProxyFault | None) -> HttpResponse:
         """Store the response the client receives.
 
         Returns:
             The response to forward after recording any edit.
         """
-        response = self._proxy.response(exchange)
+        response = fault.apply(exchange) if fault is not None else exchange.response
         self._proxy.log.add(Exchange(exchange.request, response))
         return response
 
@@ -256,10 +250,10 @@ class _TunnelHandler(_ForwardingHandler):
             headers = Headers((("Host", self._authority), *headers.pairs))
         return HttpRequest(self.command, self._origin_form(self.path), headers, body)
 
-    def _keep(self, exchange: Exchange) -> HttpResponse:
+    def _keep(self, exchange: Exchange, fault: ProxyFault | None) -> HttpResponse:
         if self._host.lower() in self._intercepting.passthrough:
             return exchange.response
-        response = self._proxy.response(exchange)
+        response = fault.apply(exchange) if fault is not None else exchange.response
         self._proxy.log.add(self._intercepting.redactor.apply(Exchange(exchange.request, response)))
         return response
 
@@ -395,6 +389,12 @@ class Proxy:
             The server.
         """
         raise NotImplementedError
+
+    def arm(self, fault: ProxyFault | None) -> None:
+        """Select the fault for the next test or restore healthy responses."""
+        self._fault = fault
+        if self._server is not None:
+            self._server.fault = fault
 
     def start(self) -> None:
         """Open the port and serve in a background thread."""

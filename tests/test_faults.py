@@ -126,9 +126,8 @@ def test_forwarded_bytes_and_headers() -> None:
     with patch.object(proxy, "_make_server", return_value=server), patch("lesstests.proxy.threading.Thread"):
         proxy.start()
         proxy.stop()
-    server.response.side_effect = lambda pair: _LoggingServer.response(server, pair)
     handler._proxy = server
-    handler._keep.side_effect = lambda pair: _ForwardingHandler._keep(handler, pair)
+    handler._keep.side_effect = lambda pair, active: _ForwardingHandler._keep(handler, pair, active)
     for body in (b'{"a": 2}', data):
         handler.wfile = io.BytesIO()
         handler.send_header.reset_mock()
@@ -219,17 +218,16 @@ def test_tunnel_skips_passthrough_and_redacts_edited_response() -> None:
     """Requirement: Passthrough leaves the fault armed and the tunnel logs the redacted edit."""
     handler = Mock(spec=_TunnelHandler)
     fault = ProxyFault(API, FaultFamily("GET /pets/{pet}", "get", 200, (), "wrong value.number"))
-    handler._proxy.response.side_effect = fault.apply
     handler._proxy.log = ExchangeLog()
     handler._intercepting.passthrough = {"skip"}
     handler._intercepting.redactor = Redactor(frozenset({"secret"}))
     exchange = _exchange(b"1", headers=Headers((("secret", "private"),)))
     handler._host = "skip"
-    assert _TunnelHandler._keep(handler, exchange) is exchange.response
+    assert _TunnelHandler._keep(handler, exchange, fault) is exchange.response
     assert not fault.applied
     assert handler._proxy.log.take() == ([], [])
     handler._host = "included"
-    response = _TunnelHandler._keep(handler, exchange)
+    response = _TunnelHandler._keep(handler, exchange, fault)
     assert response.headers.get("secret") == "private"
     assert response.body.data == b"2"
     logged = handler._proxy.log.take()[0][0].response

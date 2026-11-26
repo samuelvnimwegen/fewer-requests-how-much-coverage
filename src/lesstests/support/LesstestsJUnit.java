@@ -44,7 +44,7 @@ import org.junit.platform.launcher.core.LauncherFactory;
  */
 public final class LesstestsJUnit {
 
-    private static final List<String> WORST_FIRST = List.of("FAIL", "SKIP", "PASS");
+    private static final List<String> WORST_FIRST = List.of("ASSERT", "FAIL", "SKIP", "PASS");
 
     private LesstestsJUnit() {
     }
@@ -127,9 +127,16 @@ public final class LesstestsJUnit {
         launcher.execute(LauncherDiscoveryRequestBuilder.request().selectors(selectors).build(), listener);
         Files.createDirectories(reports);
         List<String> lines = new ArrayList<>();
+        List<String> failures = new ArrayList<>();
         for (String id : outcomes.keySet()) {
-            lines.add(id + "\t" + listener.outcome(id));
+            String outcome = listener.outcome(id);
+            if (outcome.equals("ASSERT") || outcome.equals("FAIL")) {
+                failures.add(id + "\t" + (outcome.equals("ASSERT") ? "assertion failure" : "client error"));
+                outcome = "FAIL";
+            }
+            lines.add(id + "\t" + outcome);
         }
+        Files.write(reports.resolve("failures.tsv"), failures, StandardCharsets.UTF_8);
         Files.write(reports.resolve("results.tsv"), lines, StandardCharsets.UTF_8);
     }
 
@@ -159,7 +166,7 @@ public final class LesstestsJUnit {
             String status = switch (result.getStatus()) {
                 case SUCCESSFUL -> "PASS";
                 case ABORTED -> "SKIP";
-                case FAILED -> "FAIL";
+                case FAILED -> result.getThrowable().orElse(null) instanceof AssertionError ? "ASSERT" : "FAIL";
             };
             result.getThrowable().ifPresent(error -> {
                 System.err.println("lesstests: " + identifier.getDisplayName() + " " + status);

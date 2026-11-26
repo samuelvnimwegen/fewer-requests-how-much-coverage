@@ -525,6 +525,7 @@ class RunResult:
 
     outcome: Outcome
     seconds: float
+    failure_kind: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -555,6 +556,14 @@ class Launcher(Protocol):
 
         Returns:
             The arguments after the classpath.
+        """
+        ...
+
+    def failure_kind(self, reports: Path, test: JavaTest) -> str | None:
+        """Read the throwable behind a reported failure.
+
+        Returns:
+            Its category if the test report identifies it.
         """
         ...
 
@@ -592,6 +601,24 @@ class TestNgLauncher:
         suite_file = reports / "suite.xml"
         suite_file.write_text(self.suite_xml(tests, name), encoding="utf-8")
         return [self.MAIN, "-d", str(reports), *settings.testng_arguments(), str(suite_file)]
+
+    def failure_kind(self, reports: Path, test: JavaTest) -> str | None:
+        """Read the throwable behind a reported failure.
+
+        Returns:
+            Its category if the test report identifies it.
+        """
+        classes = {
+            exception.get("class", "") if (exception := method.find("exception")) is not None else ""
+            for method in self._methods(reports / "testng-results.xml", test)
+            if method.get("status") == "FAIL"
+        }
+        if any(
+            name.endswith(("AssertionError", "AssertionFailedError", "ComparisonFailure", "MultipleFailuresError"))
+            for name in classes
+        ):
+            return "assertion failure"
+        return "client error" if classes and all(classes) else None
 
     def outcomes(self, reports: Path, tests: list[JavaTest]) -> dict[JavaTest, Outcome]:
         """Read `testng-results.xml`.
@@ -670,6 +697,20 @@ class JUnitLauncher:
         selection = reports / "selection.tsv"
         selection.write_text("".join(f"{test.class_name}\t{test.method}\n" for test in tests), encoding="utf-8")
         return [self.MAIN, "run", str(reports), str(selection)]
+
+    def failure_kind(self, reports: Path, test: JavaTest) -> str | None:
+        """Read the throwable behind a reported failure.
+
+        Returns:
+            Its category if the test report identifies it.
+        """
+        path = reports / "failures.tsv"
+        if path.exists():
+            for line in path.read_text(encoding="utf-8").splitlines():
+                cls, method, reason = line.split("\t")
+                if JavaTest(cls, method) == test:
+                    return reason
+        return None
 
     def outcomes(self, reports: Path, tests: list[JavaTest]) -> dict[JavaTest, Outcome]:
         """Read `results.tsv`. `LesstestsJUnit` writes `MISSING` for a method it never saw finish.
@@ -771,7 +812,9 @@ class JvmRunner:
         started = time.monotonic()
         if not self._java(self._launcher.one(test, reports, self._settings), reports, self._timeout):
             return RunResult(Outcome.ERROR, time.monotonic() - started)
-        return RunResult(self._launcher.outcomes(reports, [test])[test], time.monotonic() - started)
+        outcome = self._launcher.outcomes(reports, [test])[test]
+        kind = self._launcher.failure_kind(reports, test) if outcome == Outcome.FAILED else None
+        return RunResult(outcome, time.monotonic() - started, kind)
 
     def run_suite(self, tests: list[JavaTest], name: str) -> SuiteRun:
         """Run all these tests together in one JVM.
