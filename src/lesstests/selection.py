@@ -1,6 +1,8 @@
 import math
 import random
+from collections import Counter
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Protocol
 
 import numpy as np
@@ -9,6 +11,7 @@ from scipy.sparse import csr_array, lil_array
 
 from lesstests.coverage import CoverageItem, CoverageSet, SuiteCoverage
 from lesstests.java import JavaTest
+from lesstests.traffic import FAMILIES, TrafficCoverage
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,6 +157,26 @@ class CoverageSelector:
         return [LinearConstraint(csr_array(reach), -np.inf, 0), LinearConstraint(count, size, size)]
 
 
+@dataclass(frozen=True, slots=True)
+class CoverOptions:
+    """Traffic families and the minimum share of their combined items."""
+
+    families: tuple[str, ...] = ()
+    share: float = 1.0
+
+    def __post_init__(self) -> None:
+        """Check the cover settings.
+
+        Raises:
+            ValueError: If a family is unknown or the share is outside the unit interval.
+        """
+        unknown = set(self.families).difference(FAMILIES)
+        if unknown:
+            raise ValueError(f"Unknown traffic families: {', '.join(sorted(unknown))}")
+        if not 0 <= self.share <= 1:
+            raise ValueError("Traffic share must be between 0 and 1")
+
+
 class SmallestCover:
     """Picks the fewest tests that still reach every item of a target, then the fewest requests among those.
 
@@ -161,7 +184,12 @@ class SmallestCover:
     """
 
     def select(
-        self, candidates: dict[JavaTest, CoverageSet], requests: dict[JavaTest, int], target: CoverageSet
+        self,
+        candidates: dict[JavaTest, CoverageSet],
+        requests: dict[JavaTest, int],
+        target: CoverageSet,
+        traffic: TrafficCoverage | None = None,
+        share: float = 1.0,
     ) -> list[JavaTest]:
         """Pick the tests.
 
@@ -169,34 +197,69 @@ class SmallestCover:
             The picked tests, sorted.
 
         Raises:
-            ValueError: If no candidate reaches some item of the target.
+            ValueError: If the candidates cannot cover the required items or the share is invalid.
             RuntimeError: If the solver finds no plan.
         """
+        if not 0 <= share <= 1:
+            raise ValueError("Traffic share must be between 0 and 1")
         tests = sorted(candidates)
         items = sorted(target.items)
-        if not items:
+
+        # Items with the same witnesses count together even when only part of the traffic is required.
+        groups: Counter[frozenset[JavaTest]] = Counter()
+        if traffic is not None and share > 0:
+            groups.update(
+                frozenset(family[item].intersection(candidates))
+                for family in traffic.witnesses.values()
+                for item in sorted(family)
+            )
+        if not items and not groups:
             return []
+
+        # Decimal multiplication keeps a share such as 0.14 from rounding just above seven of fifty.
+        required = math.ceil(Decimal(str(share)) * groups.total())
+        if groups.total() - groups[frozenset()] < required:
+            raise ValueError("The eligible tests cannot cover the required traffic share")
+        partial = 0 < required < groups.total()
+        variables = len(tests) + (len(groups) if partial else 0)
         index = {item: number for number, item in enumerate(items)}
-        reach = lil_array((len(items), len(tests)))
+        reach = lil_array((len(items) + len(groups), variables))
         for column, test in enumerate(tests):
             for item in candidates[test].items:
                 if item in index:
                     reach[index[item], column] = 1
+        columns = {test: i for i, test in enumerate(tests)}
+        for i, group in enumerate(groups):
+            for test in group:
+                reach[len(items) + i, columns[test]] = 1
+            if partial:
+                reach[len(items) + i, len(tests) + i] = -1
         covered = csr_array(reach)
-        unreachable = [items[row] for row in range(len(items)) if covered[[row], :].sum() == 0]
+        unreachable = [items[row] for row in range(len(items)) if covered.indptr[row] == covered.indptr[row + 1]]
         if unreachable:
             raise ValueError(f"No candidate reaches {len(unreachable)} target items, such as {unreachable[0]}")
-        every_item = LinearConstraint(covered, 1, np.inf)
-        integrality = np.ones(len(tests))
-        bounds = Bounds(0, 1)
+        required_rows = len(items) if partial else len(items) + len(groups)
+        constraints = [LinearConstraint(covered[:required_rows, :], 1, np.inf)]
+        if partial:
+            constraints.append(LinearConstraint(covered[required_rows:, :], 0, np.inf))
 
-        fewest_tests = milp(np.ones(len(tests)), constraints=[every_item], integrality=integrality, bounds=bounds)
+            # A group can count only if a selected test witnesses it. Its weight is the number of items it represents.
+            weights = np.r_[np.zeros(len(tests)), list(groups.values())]
+            constraints.append(LinearConstraint(weights, required, np.inf))
+        indicators = np.zeros(variables - len(tests))
+        count = np.r_[np.ones(len(tests)), indicators]
+        bounds = Bounds(0, 1)
+        options = {"mip_rel_gap": 0.0} if traffic is not None else None
+
+        # The group indicators are whole numbers too. A fraction inside the solver's tolerance would count as an item.
+        whole = np.ones(variables)
+        fewest_tests = milp(count, constraints=constraints, integrality=whole, bounds=bounds, options=options)
         if not fewest_tests.success:
             raise RuntimeError(f"The cover program failed: {fewest_tests.message}")
         size = round(fewest_tests.fun)
-        keep_size = LinearConstraint(np.ones((1, len(tests))), size, size)
-        cost = np.asarray([requests[test] for test in tests], dtype=float)
-        cheapest = milp(cost, constraints=[every_item, keep_size], integrality=integrality, bounds=bounds)
+        constraints.append(LinearConstraint(count, size, size))
+        cost = np.r_[[requests[test] for test in tests], indicators]
+        cheapest = milp(cost, constraints=constraints, integrality=whole, bounds=bounds, options=options)
         if not cheapest.success:
             raise RuntimeError(f"The request program failed: {cheapest.message}")
-        return sorted(test for test, chosen in zip(tests, cheapest.x, strict=True) if chosen > 0.5)
+        return [test for test, chosen in zip(tests, cheapest.x[: len(tests)], strict=True) if chosen > 0.5]

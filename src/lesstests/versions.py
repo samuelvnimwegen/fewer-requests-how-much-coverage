@@ -8,9 +8,10 @@ from typing import Any, Self
 from lesstests.api import ApiDescription, ValueItem
 from lesstests.coverage import CoverageSet, SuiteCoverage
 from lesstests.jacoco import CodeKept
-from lesstests.java import JavaTest
+from lesstests.java import JavaTest, Outcome
 from lesstests.recording import RecordedTest
-from lesstests.selection import SmallestCover
+from lesstests.selection import CoverOptions, SmallestCover
+from lesstests.traffic import TrafficCoverage
 
 
 @dataclass(slots=True)
@@ -26,6 +27,7 @@ class SuiteVersion:
     values: frozenset[ValueItem]
     requests: int
     code: CodeKept | None = None
+    traffic: dict[str, int] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Turn the version into JSON friendly data.
@@ -40,6 +42,7 @@ class SuiteVersion:
             "values": [value.to_list() for value in sorted(self.values)],
             "requests": self.requests,
             **({"code": self.code.to_dict()} if self.code else {}),
+            **({"traffic": self.traffic} if self.traffic is not None else {}),
         }
 
     @classmethod
@@ -56,6 +59,7 @@ class SuiteVersion:
             frozenset(ValueItem.from_list(value) for value in raw["values"]),
             raw["requests"],
             CodeKept.from_dict(raw["code"]) if "code" in raw else None,
+            raw.get("traffic"),
         )
 
 
@@ -66,9 +70,10 @@ class VersionPlan:
     SELECT = "Select"
     SELECT_MERGE = "Select + Merge"
 
-    def __init__(self, versions: list[SuiteVersion]) -> None:
+    def __init__(self, versions: list[SuiteVersion], options: CoverOptions | None = None) -> None:
         """Keep the versions, the original first."""
         self.versions = versions
+        self.options = options
 
     @property
     def original(self) -> SuiteVersion:
@@ -78,8 +83,20 @@ class VersionPlan:
     def save(self, path: Path) -> None:
         """Write the plan as JSON."""
         path.parent.mkdir(parents=True, exist_ok=True)
-        raw = {"versions": [version.to_dict() for version in self.versions]}
+        raw = {"versions": [version.to_dict() for version in self.versions], **self.settings()}
         path.write_text(json.dumps(raw, indent=1), encoding="utf-8")
+
+    def settings(self) -> dict[str, Any]:
+        """Describe the selection rule for a saved result.
+
+        Returns:
+            The minimum cover settings when the user chose that mode.
+        """
+        if self.options is None:
+            return {}
+        return {
+            "selection": {"objective": "tests", "families": list(self.options.families), "share": self.options.share}
+        }
 
     @classmethod
     def load(cls, path: Path) -> Self:
@@ -89,7 +106,9 @@ class VersionPlan:
             The plan.
         """
         raw = json.loads(path.read_text(encoding="utf-8"))
-        return cls([SuiteVersion.from_dict(version) for version in raw["versions"]])
+        settings = raw.get("selection")
+        options = CoverOptions(tuple(settings["families"]), settings["share"]) if settings else None
+        return cls([SuiteVersion.from_dict(version) for version in raw["versions"]], options)
 
     def markdown(self) -> str:
         """Write what the recordings predict for each version, before any benchmark run.
@@ -115,6 +134,20 @@ class VersionPlan:
             if version.code is not None:
                 cells += [CodeShare.cell(version.code, kind) for kind in CodeKept.KINDS]
             lines.append("| " + " | ".join(cells) + " |")
+        if self.options is not None:
+            lines += ["", "Select keeps the fewest tests, then the fewest requests."]
+            if self.options.families:
+                lines += [
+                    "",
+                    f"Select must keep at least {self.options.share * 100:g}% of the traffic items.",
+                    "",
+                    "| Family | Full | Kept |",
+                    "|---|---:|---:|",
+                ]
+                for family in self.options.families:
+                    full_count = (self.original.traffic or {})[family]
+                    kept_count = (self.versions[1].traffic or {})[family]
+                    lines.append(f"| {family} | {full_count} | {kept_count} |")
         return "\n".join(lines) + "\n"
 
 
@@ -147,7 +180,7 @@ class VersionPlanner:
         self._api = api
         self._original_coverage, self._original_records = original
 
-    def plan(self) -> VersionPlan:
+    def plan(self, options: CoverOptions | None = None, passing_only: bool = False) -> VersionPlan:
         """Pick the tests of Original and Select, for a suite without a Merge step.
 
         Returns:
@@ -155,13 +188,25 @@ class VersionPlanner:
         """
         coverage = dict(self._original_coverage.per_test)
         records = {record.test: record for record in self._original_records}
-        select = SmallestCover().select(coverage, self._requests(records), self._original_coverage.full)
-        return VersionPlan(
-            [
-                self._version(VersionPlan.ORIGINAL, sorted(records), coverage, records),
-                self._version(VersionPlan.SELECT, select, coverage, records),
-            ]
+        candidates = {
+            test: items
+            for test, items in coverage.items()
+            if not passing_only or records[test].outcome is Outcome.PASSED
+        }
+        traffic = None
+        if options is not None:
+            traffic = TrafficCoverage.collect(
+                self._original_records, self._api, self._original_coverage.full, options.families
+            )
+        select = SmallestCover().select(
+            candidates, self._requests(records), self._original_coverage.full, traffic, options.share if options else 1
         )
+        original = self._version(VersionPlan.ORIGINAL, sorted(records), coverage, records)
+        selected = self._version(VersionPlan.SELECT, select, coverage, records)
+        if traffic is not None:
+            original.traffic = traffic.counts(original.tests)
+            selected.traffic = traffic.counts(select)
+        return VersionPlan([original, selected], options)
 
     def plan_with_merge(self, merged: tuple[SuiteCoverage, list[RecordedTest]] | None) -> VersionPlan:
         """Add Select + Merge, which may also pick the kept merged copies. With none kept it equals Select.
