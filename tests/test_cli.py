@@ -560,30 +560,47 @@ def test_invalid_traffic_options_fail_before_reading_the_recording(options: list
             cli.main([*command, "--recording", "missing", *options])
 
 
-def test_budget_commands_report_the_same_pick_and_limits(
+def test_warning_traffic_leaves_the_pick_alone(
     tmp_path: Path, restcov: tuple[FakeRestCov, list[tuple[Path, Path]]], capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Requirement: Plan and select print and save the same budget limits and actual losses."""
+    """Requirement: Traffic warnings describe the fixed budget pick and leave its tests alone."""
     recording = _recording(tmp_path / "rec")
     (recording.folder / "spec.json").write_text(json.dumps({"paths": {}}))
-    common = ["--recording", str(recording.folder), "--restcov", "fake", "--traffic", "fields"]
-    cli.main(["select", *common, "--budgets", "50", "--draws", "0"])
+    args = ["select", "--recording", str(recording.folder), "--restcov", "fake", "--budgets", "50", "--draws", "0"]
     selection = recording.folder / "selection"
+    cli.main(args)
+    original = json.loads((selection / "selection.json").read_text())["versions"][0]
+    cli.main([*args, "--warn-traffic", "fields"])
     selected = json.loads((selection / "selection.json").read_text())["versions"][0]
+    assert selected["tests"] == original["tests"]
     warning = selected["budget_warning"]
     assert warning["report"] in capsys.readouterr().out
     assert warning["report"] in (selection / "report.md").read_text()
-    out = tmp_path / "plan"
-    cli.main(["plan", *common, "--budget", "50", "--out", str(out)])
-    raw = json.loads((out / "plan.json").read_text())
-    assert raw["versions"][1]["tests"] == selected["tests"]
-    assert raw["budget_warning"] == warning
-    assert warning["report"] in capsys.readouterr().out
-    assert warning["report"] in cli.VersionPlan.load(out / "plan.json").markdown()
-    assert warning["kinds"]["paths"] == {
-        "total": 4,
-        "most": {"value": 2, "qualifier": ""},
-        "minimum": {"value": 4, "qualifier": ""},
-    }
-    assert len(warning["lost"]["paths"]) == 2
+    assert "Any 2 tests lose at least 2 of your 4 RESTCov items." in warning["message"]
     assert "fields" in warning["lost"]
+    assert "| fields | 0 |" not in warning["report"]
+
+
+@pytest.mark.parametrize("option", [["--traffic", "fields"], ["--traffic-share", "0.9"], ["--objective", "tests"]])
+def test_budget_study_rejects_cover_options(option: list[str]) -> None:
+    """Requirement: A budget cannot change the meaning of a cover option."""
+    with pytest.raises(SystemExit, match="fixed budget study"):
+        cli.main(["select", "--recording", "missing", "--budgets", "50", *option])
+
+
+@pytest.mark.parametrize("values", [["0"], ["150"], ["nan"], ["50", "50"]])
+def test_invalid_budget_stops_before_reading_the_recording(values: list[str]) -> None:
+    """Requirement: Invalid budgets give a command error before the recording is read."""
+    with pytest.raises(SystemExit, match="budget"):
+        cli.main(["select", "--recording", "missing", "--budgets", *values])
+
+
+@pytest.mark.parametrize(
+    "options",
+    [["--budget", "0"], ["--budget", "50", "--objective", "tests"], ["--budget", "50", "--traffic-share", "0.9"]],
+)
+def test_plan_rejects_a_fixed_budget(options: list[str], capsys: pytest.CaptureFixture[str]) -> None:
+    """Requirement: Plan accepts only its original selection modes."""
+    with pytest.raises(SystemExit):
+        cli.main(["plan", "--recording", "missing", "--out", "unused", *options])
+    assert "unrecognized arguments: --budget" in capsys.readouterr().err

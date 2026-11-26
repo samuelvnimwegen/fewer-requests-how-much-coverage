@@ -298,6 +298,10 @@ class SelectCommand(CoverCommand):
     def add_arguments(self, parser: argparse.ArgumentParser) -> None:
         """Declare the recording, RESTCov, the budgets and the draws."""
         super().add_arguments(parser)
+        parser.add_argument(
+            "--warn-traffic",
+            help="report losses for commands,modes,fields,readbacks without steering the pick",
+        )
         parser.add_argument("--budgets", type=float, nargs="+", help="percentages to keep")
         parser.add_argument("--draws", type=int, help="random draws per budget")
         parser.add_argument("--seed", type=int)
@@ -310,31 +314,34 @@ class SelectCommand(CoverCommand):
             SystemExit: If a budget study option is used with the minimum cover.
         """
         options = self.options(args)
-        fixed = args.budgets is not None and args.objective is None and args.traffic_share is None
-        if options and not fixed and any(value is not None for value in (args.budgets, args.draws, args.seed)):
+        if options and any(value is not None for value in (args.budgets, args.draws, args.seed)):
             raise SystemExit("Budgets, draws and seed apply only to the fixed budget study")
+        if options and args.warn_traffic is not None:
+            raise SystemExit("--warn-traffic applies only to the fixed budget study")
+        try:
+            families = (
+                CoverOptions(tuple(dict.fromkeys(name.strip() for name in args.warn_traffic.split(",")))).families
+                if args.warn_traffic is not None
+                else ()
+            )
+            budgets = [Budget(percent / 100) for percent in args.budgets or [75, 50, 25]]
+        except ValueError as error:
+            raise SystemExit(str(error)) from error
+        if len({budget.label for budget in budgets}) != len(budgets):
+            raise SystemExit("Every budget needs its own label")
         recording = Recording(args.recording.resolve())
         restcov = RestCovOption.restcov(args, recording.meta())
         coverage = self.coverage(recording, restcov)
         out = recording.folder / "selection"
         code = JaCoCoOption.recording_code(args, recording)
-        if options is not None and not fixed:
+        if options is not None:
             CoverStudy(recording, coverage, restcov, code).run(out, options, args.passing_only)
         else:
-            budgets = [Budget(percent / 100) for percent in args.budgets or [75, 50, 25]]
             draws = 30 if args.draws is None else args.draws
             seed = 1 if args.seed is None else args.seed
-            SelectionStudy(
-                recording,
-                coverage,
-                restcov,
-                budgets,
-                draws,
-                seed,
-                args.passing_only,
-                code,
-                options.families if options else (),
-            ).run(out)
+            SelectionStudy(recording, coverage, restcov, budgets, draws, seed, args.passing_only, code, families).run(
+                out
+            )
         print((out / "report.md").read_text(encoding="utf-8"))
 
 
@@ -370,23 +377,15 @@ class PlanCommand(CoverCommand):
     def add_arguments(self, parser: argparse.ArgumentParser) -> None:
         """Declare the recording, RESTCov and the output folder."""
         super().add_arguments(parser)
-        parser.add_argument("--budget", type=float, help="percentage of tests to keep")
         parser.add_argument("--out", type=Path, required=True, help="the plan folder that `bench --plan` reads")
 
     def run(self, args: argparse.Namespace) -> None:
-        """Pick the tests and write the plan.
-
-        Raises:
-            SystemExit: If both selection objectives were requested.
-        """
+        """Pick Select's tests and write the folder the benchmark reads."""
         options = self.options(args)
-        if args.budget is not None and (args.objective or args.traffic_share is not None):
-            raise SystemExit("A fixed budget cannot also request a minimum cover")
-        budget = Budget(args.budget / 100) if args.budget is not None else None
         recording = Recording(args.recording.resolve())
         coverage = self.coverage(recording, RestCovOption.restcov(args, recording.meta()))
         code = JaCoCoOption.recording_code(args, recording)
-        print(PlanStudy(recording, coverage, code).run(args.out.resolve(), options, budget))
+        print(PlanStudy(recording, coverage, code).run(args.out.resolve(), options))
 
 
 class BenchCommand:
