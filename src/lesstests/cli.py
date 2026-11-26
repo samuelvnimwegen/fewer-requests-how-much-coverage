@@ -11,8 +11,7 @@ from lesstests.bench import Benchmark, BenchReport, BenchRun
 from lesstests.code_coverage import BenchCode, RecordingCode
 from lesstests.coverage import RestCov, SuiteCoverage
 from lesstests.fault_inventory import FaultInventory
-from lesstests.fault_plan import FaultPlan
-from lesstests.fault_run import FaultRun, FaultSession
+from lesstests.fault_run import FaultPlan, FaultRun, FaultSession
 from lesstests.jacoco import JaCoCo
 from lesstests.merge_study import MergeFolder, MergeStudy, PlanStudy
 from lesstests.recording import RecordedTest, Recorder, Recording
@@ -439,7 +438,7 @@ class FaultPlanCommand:
         parser.add_argument("--out", type=Path, required=True)
         parser.add_argument("--size", type=BenchCommand.at_least_one, required=True)
         parser.add_argument("--seed", type=int, default=25)
-        parser.add_argument("--test-limit", type=BenchCommand.at_least_one)
+        parser.add_argument("--test-limit", type=BenchCommand.at_least_one, default=3)
 
     def run(self, args: argparse.Namespace) -> None:
         """Save the reproducible plan and print its costs."""
@@ -458,8 +457,9 @@ class FaultRunCommand:
         """Choose the saved plan, results folder and early gate."""
         parser.add_argument("--plan", type=Path, required=True)
         parser.add_argument("--out", type=Path, required=True)
+        parser.allow_abbrev = False
         parser.add_argument("--live", action="store_true")
-        parser.add_argument("--gate", action="store_true", help="stop at 18 client error families in the first 20")
+        parser.add_argument("--gate", action="store_true", help="check the verdict mix after 20 families")
         EnvFile.add_argument(parser)
 
     def run(self, args: argparse.Namespace) -> None:
@@ -475,24 +475,9 @@ class FaultRunCommand:
         folder = args.out.resolve()
         if folder.is_relative_to(Path(plan.recording)):
             raise SystemExit("Choose a results folder outside the recording")
-        FaultRun(plan, folder).run(lambda: FaultSession.open(plan, folder, EnvFile.read(args.env_file)), args.gate)
-
-
-class FaultScoreCommand:
-    """Score a kept suite against the observed catches."""
-
-    name = "fault-score"
-    help = "count how many observed catches the kept suite retains"
-
-    def add_arguments(self, parser: argparse.ArgumentParser) -> None:
-        """Name the kills file and the list of kept tests."""
-        parser.add_argument("--kills", type=Path, required=True)
-        parser.add_argument("--kept", type=Path, required=True)
-
-    def run(self, args: argparse.Namespace) -> None:
-        """Print the measured catches by kind."""
-        kept = {line.strip() for line in args.kept.read_text(encoding="utf-8").splitlines() if line.strip()}
-        print(json.dumps(FaultRun.score(args.kills, kept), indent=2))
+        experiment = FaultRun(plan, folder)
+        env = EnvFile.read(args.env_file)
+        experiment.run(lambda: FaultSession.open(plan, folder, env), args.gate, experiment.identity(env))
 
 
 COMMANDS: tuple[Command, ...] = (
@@ -505,7 +490,6 @@ COMMANDS: tuple[Command, ...] = (
     FaultsCommand(),
     FaultPlanCommand(),
     FaultRunCommand(),
-    FaultScoreCommand(),
 )
 
 
