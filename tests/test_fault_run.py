@@ -192,6 +192,8 @@ def test_identity(tmp_path: Path) -> None:
             keys.append(run.identity({}))
         rec.save(RecordedTest(JavaTest("pets", "a"), Outcome.PASSED, 1, []))
         keys.append(run.identity({}))
+        with patch("lesstests.fault_run.version", return_value="another version"):
+            keys.append(run.identity({}))
         run.plan.seed += 1
         keys.append(run.identity({}))
         command.return_value = b"other runtime"

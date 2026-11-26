@@ -10,6 +10,7 @@ from collections import Counter, defaultdict
 from collections.abc import Callable, Generator
 from contextlib import AbstractContextManager, ExitStack, closing, contextmanager
 from dataclasses import asdict, dataclass
+from importlib.metadata import version
 from itertools import pairwise
 from pathlib import Path
 from statistics import median
@@ -244,7 +245,6 @@ class FaultSession:
             "execution": token,
             "applied": received and not control,
             "receipt": received,
-            "matched": bool(hit),
             "sent": fault.sent,
             "failures": failures,
             "reset": "before each solo JVM",
@@ -306,7 +306,8 @@ class FaultRun:
         java = subprocess.check_output(["java", "-version"], stderr=subprocess.STDOUT)
         names = "JAVA_HOME PATH JAVA_TOOL_OPTIONS JDK_JAVA_OPTIONS DOCKER_HOST DOCKER_CONTEXT"
         settings = {k: os.getenv(k) for k in names.split()}
-        digest = hashlib.sha256(json.dumps([asdict(self.plan), env, settings], sort_keys=True).encode() + images + java)
+        facts = [asdict(self.plan), version("lesstests"), env, settings]
+        digest = hashlib.sha256(json.dumps(facts, sort_keys=True).encode() + images + java)
         paths = [Path(meta["spec"]), recording.folder / "meta.json", *recording.tests_folder.glob("*.json")]
         paths.extend(recording.project_folder.rglob("*"))
         paths.extend([*SUPPORT.iterdir(), *SUPPORT.parent.glob("*.py")])
