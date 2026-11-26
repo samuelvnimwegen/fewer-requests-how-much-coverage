@@ -23,7 +23,9 @@ public class Sample {
     @ParameterizedTest @ValueSource(ints={1,2})
     public void mixed(int n) throws Exception {
         Client fake = (request, options) -> Response.builder().status(200).reason("OK").request(request)
-                .headers(request.headers()).body(new byte[]{42}).build();
+                .headers(Map.of(FaultEvidence.HEADER, List.of(
+                        request.headers().get(FaultEvidence.HEADER).contains("token") ? "proof" : "bad")))
+                .body(new byte[]{42}).build();
         var request = Request.create(Request.HttpMethod.GET, "http://example.invalid/", Map.of(),
                 (byte[])null, null, new RequestTemplate());
         try (var response = FaultInterceptor.wrap(fake).execute(request, new Request.Options())) {
@@ -49,7 +51,8 @@ public class Sample {
     }
     @Test public void mixed() {
         var response = RestAssured.given().filter((req, spec, chain) -> new ResponseBuilder().setStatusCode(200)
-                .setHeader(FaultEvidence.HEADER, req.getHeaders().getValue(FaultEvidence.HEADER))
+                .setHeader(FaultEvidence.HEADER,
+                        "token".equals(req.getHeaders().getValue(FaultEvidence.HEADER)) ? "proof" : "bad")
                 .setBody(new byte[]{42}).build()).get("http://example.invalid/");
         if (response.asByteArray()[0] != 42 || response.header(FaultEvidence.HEADER) != null)
             throw new AssertionError("wrapper changed the response");
@@ -100,10 +103,10 @@ def test_framework_evidence(tmp_path: Path, framework: str) -> None:
         lines = events.read_text().splitlines()
         failures = [line.split("\t") for line in lines if "\t" in line]
         if setup:
-            assert "token" not in lines
+            assert "proof" not in lines
             assert failures[0] == ["outside selected method", "java.lang.IllegalStateException", "setup stopped"]
         else:
-            assert lines[0] == "token"
+            assert lines[0] == "proof"
             expected = (
                 [
                     ["client error", "java.lang.IllegalArgumentException", "first"],

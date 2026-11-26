@@ -12,6 +12,7 @@ from decimal import Decimal
 from http import HTTPStatus
 from typing import Any, Self
 from urllib.parse import parse_qs, urlsplit
+from uuid import uuid4
 
 from lesstests.api import ApiDescription
 from lesstests.exchange import Body, Exchange, HttpResponse
@@ -401,6 +402,7 @@ class ProxyFault:
 
     def __init__(self, api: ApiDescription, family: FaultFamily, execution: str = "", observe: bool = False) -> None:
         """Arm the proxy with a family from the inventory."""
+        self.receipt = uuid4().hex if execution else ""
         self.execution = execution
         self.observe = observe
         self.sent = False

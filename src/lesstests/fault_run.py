@@ -26,7 +26,6 @@ from lesstests.recording import EveryClass, Recording
 from lesstests.subjects import SUBJECTS, Connection, Runners
 
 CATCHES = ("assertion failure", "client error")
-UNCAUGHT = "not caught by the sampled tests"
 SUPPORT = Path(__file__).parent / "support"
 
 
@@ -226,16 +225,16 @@ class FaultSession:
             proxy.arm(None)
         traffic, errors = proxy.log.take()
         events = path.read_text().splitlines() if path.exists() else []
-        failures = [line.split("\t", 2) for line in events if line not in {token, "finished"}]
+        failures = [line.split("\t", 2) for line in events if "\t" in line]
         expected_exit = int(self.testng and result.outcome == Outcome.FAILED)
         normal = result.exit_code == expected_exit and events.count("finished") == 1
-        received = bool(fault.hit and fault.sent and token in events and not errors)
+        received = bool(fault.hit and fault.sent and fault.receipt in events and not errors)
         verdict, reason = "not applied", "No completed call phase delivery and client receipt"
         if received:
             verdict, reason = "unresolved", "Inconsistent outcome, failure phase or JVM exit"
             if normal and result.outcome == Outcome.PASSED and not failures:
                 verdict, reason = "passed", ""
-            elif normal and result.outcome == Outcome.FAILED and failures and events[0] == token:
+            elif normal and result.outcome == Outcome.FAILED and failures and events[0] == fault.receipt:
                 kinds = {failure[0] for failure in failures}
                 if len(kinds) == 1 and failures[0][0] in CATCHES:
                     verdict, reason = failures[0][0], ""
@@ -326,10 +325,9 @@ class FaultRun:
             lock = stack.enter_context(closing(sqlite3.connect(self.folder / "run.lock", timeout=0)))
             lock.execute("BEGIN IMMEDIATE")
             marker = self.folder / "identity.json"
-            if marker.exists():
-                if json.loads(marker.read_text()) != identity:
-                    raise ValueError("The plan, recording, tool or runtime changed")
-            elif any(p.name not in {"run.lock", "run.lock-journal"} for p in self.folder.iterdir()):
+            if marker.exists() and json.loads(marker.read_text()) != identity:
+                raise ValueError("The plan, recording, tool or runtime changed")
+            if not marker.exists() and set(os.listdir(self.folder)) - {"run.lock", "run.lock-journal"}:
                 raise ValueError("Existing results have no matching identity")
             self._write(marker, identity)
             stopped = False
@@ -341,17 +339,15 @@ class FaultRun:
             for index, trial in enumerate(self.plan.trials, 1):
                 checkpoint = self.folder / f"family-{index}.json"
                 pairs = json.loads(checkpoint.read_text()) if checkpoint.exists() else {}
-                for test in trial.tests:
-                    if test not in pairs:
-                        if stopped:
-                            return
-                        if session is None:
-                            session = stack.enter_context(connect())
-                        pairs[test] = session.pair(trial.family, test)
-                        self._write(checkpoint, pairs)
+                for test in (t for t in trial.tests if t not in pairs):
+                    if stopped:
+                        return
+                    session = session or stack.enter_context(connect())
+                    pairs[test] = session.pair(trial.family, test)
+                    self._write(checkpoint, pairs)
                 caught = [t for t in trial.tests if pairs[t]["verdict"] in CATCHES]
                 verdicts = {p["verdict"] for p in pairs.values() if not p.get("excluded")}
-                fallback = UNCAUGHT if verdicts == {"passed"} else "unresolved"
+                fallback = "not caught by the sampled tests" if verdicts == {"passed"} else "unresolved"
                 verdict = next((k for k in CATCHES if k in verdicts), fallback)
                 rows.append(dict(family=asdict(trial.family), caught=caught, verdict=verdict, pairs=checkpoint.name))
                 self._write(path, summary)

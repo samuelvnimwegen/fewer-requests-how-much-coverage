@@ -68,6 +68,7 @@ def test_plan_and_consent(tmp_path: Path) -> None:
     [
         (False, ["receipt"], Outcome.PASSED, 0, "not applied"),
         (True, [], Outcome.PASSED, 0, "not applied"),
+        (True, ["echo"], Outcome.PASSED, 0, "not applied"),
         (True, ["receipt"], Outcome.PASSED, 0, "passed"),
         (True, ["receipt", "assertion failure"], Outcome.FAILED, 1, "assertion failure"),
         (True, ["receipt", "client error"], Outcome.FAILED, 1, "client error"),
@@ -94,9 +95,8 @@ def test_execution_receipt(
         fault.apply(replace(EXCHANGE, request=request))
         fault.sent = sent
         destination = Path(connection.settings.properties["lesstests.evidence"])
-        destination.write_text(
-            "\n".join(fault.execution if e == "receipt" else f"{e}\tThrowable\tmessage" for e in events)
-        )
+        proof = {"receipt": fault.receipt, "echo": fault.execution}
+        destination.write_text("\n".join(proof.get(e, f"{e}\tThrowable\tmessage") for e in events))
         with destination.open("a") as stream:
             stream.write(("\n" if events else "") + "finished\n")
         return RunResult(outcome, 1, code)
@@ -107,7 +107,7 @@ def test_execution_receipt(
     )
     row = session.run(FAMILY, "pets.a", False)
     assert row["verdict"] == verdict
-    assert row["failures"] == [[e, "Throwable", "message"] for e in events if e != "receipt"]
+    assert row["failures"] == [[e, "Throwable", "message"] for e in events if e not in {"receipt", "echo"}]
     connection.proxy.arm.assert_called_with(None)
     runner.run.side_effect = RuntimeError("JVM failed to start")
     with pytest.raises(RuntimeError, match="JVM failed"):

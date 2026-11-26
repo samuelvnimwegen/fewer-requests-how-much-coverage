@@ -11,11 +11,12 @@ public final class FaultListener implements ISuiteListener, IInvokedMethodListen
             }
             request.header(FaultEvidence.HEADER, FaultEvidence.TOKEN);
             var response = chain.next(request, specification);
-            if (FaultEvidence.TOKEN.equals(response.header(FaultEvidence.HEADER))) {
+            String receipt = response.header(FaultEvidence.HEADER);
+            if (receipt != null) {
                 byte[] body = response.asByteArray();
                 var headers = new java.util.ArrayList<>(response.headers().asList());
                 headers.removeIf(h -> h.getName().equalsIgnoreCase(FaultEvidence.HEADER));
-                FaultEvidence.write(FaultEvidence.TOKEN);
+                FaultEvidence.write(receipt);
                 return new io.restassured.builder.ResponseBuilder().clone(response)
                         .setHeaders(new io.restassured.http.Headers(headers)).setBody(body).build();
             }

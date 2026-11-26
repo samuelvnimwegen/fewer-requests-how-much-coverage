@@ -16,7 +16,8 @@ public final class FaultInterceptor {
             var copy = Request.create(request.httpMethod(), request.url(), tagged, request.body(),
                     request.charset(), request.requestTemplate());
             var response = client.execute(copy, options);
-            if (!response.headers().getOrDefault(FaultEvidence.HEADER, List.of()).contains(FaultEvidence.TOKEN)) {
+            var receipt = response.headers().getOrDefault(FaultEvidence.HEADER, List.of()).stream().findFirst();
+            if (receipt.isEmpty()) {
                 return response;
             }
             try (response) {
@@ -26,7 +27,7 @@ public final class FaultInterceptor {
                 if (response.body() != null) {
                     result.body(response.body().asInputStream().readAllBytes());
                 }
-                FaultEvidence.write(FaultEvidence.TOKEN);
+                FaultEvidence.write(receipt.get());
                 return result.build();
             }
         };

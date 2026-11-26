@@ -118,7 +118,7 @@ class _ForwardingHandler(BaseHTTPRequestHandler):
         # The plain send_response adds its own Server and Date, which would double the upstream ones.
         self.send_response_only(response.status, response.reason)
         if matched:
-            self.send_header("X-Lesstests-Execution", matched.execution)
+            self.send_header("X-Lesstests-Execution", matched.receipt)
         if self.command == "HEAD":
             for key, value in response.headers.without(*HOP_BY_HOP).pairs:
                 self.send_header(key, value)
