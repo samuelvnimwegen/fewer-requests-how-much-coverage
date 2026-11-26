@@ -46,6 +46,7 @@ def test_report_shows_full_selected_and_random_rows() -> None:
 
 
 def test_passing_only_sizes_budgets_from_the_pool(tmp_path: Path) -> None:
+    """Requirement: Passing tests define the budget and failures account for their own losses."""
     recording = Recording(tmp_path / "rec")
     outcomes = {"p1": Outcome.PASSED, "p2": Outcome.PASSED, "f1": Outcome.FAILED, "f2": Outcome.FAILED}
     for name, outcome in outcomes.items():
@@ -58,6 +59,10 @@ def test_passing_only_sizes_budgets_from_the_pool(tmp_path: Path) -> None:
 
     # Half of the 2 passing tests is 1. Sizing from all 4 records would keep the whole pool.
     suites = study.run(tmp_path / "selection")
+    warning = suites[0].warning
+    assert warning is not None
+    assert "2 of your 4 items come only from tests that did not pass." in warning.message()
+    assert "Any 1 test loses at least 1 of your 2 reachable RESTCov items." in warning.message()
     assert [len(suite.tests) for suite in suites] == [1, 1, 1]
     assert all(test.method.startswith("p") for suite in suites for test in suite.tests)
 

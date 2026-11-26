@@ -27,7 +27,6 @@ class SmallerSuite:
     coverage: CoverageSet
     requests: int
     code: CodeKept | None = None
-
     warning: BudgetWarning | None = None
 
     @property
