@@ -11,6 +11,7 @@ from lesstests.bench import Benchmark, BenchReport, BenchRun
 from lesstests.code_coverage import BenchCode, RecordingCode
 from lesstests.coverage import RestCov, SuiteCoverage
 from lesstests.fault_inventory import FaultInventory
+from lesstests.fault_run import FaultPlan, FaultRun, FaultSession
 from lesstests.jacoco import JaCoCo
 from lesstests.merge_study import MergeFolder, MergeStudy, PlanStudy
 from lesstests.recording import RecordedTest, Recorder, Recording
@@ -425,6 +426,60 @@ class FaultsCommand:
         print(json.dumps(report, indent=2))
 
 
+class FaultPlanCommand:
+    """Draw response faults offline."""
+
+    name = "fault-plan"
+    help = "sample response faults and estimate their run time"
+
+    def add_arguments(self, parser: argparse.ArgumentParser) -> None:
+        """Choose the sampling frame and size."""
+        parser.add_argument("--recording", type=Path, required=True)
+        parser.add_argument("--out", type=Path, required=True)
+        parser.add_argument("--size", type=BenchCommand.at_least_one, required=True)
+        parser.add_argument("--seed", type=int, default=25)
+        parser.add_argument("--test-limit", type=BenchCommand.at_least_one, default=3)
+
+    def run(self, args: argparse.Namespace) -> None:
+        """Save the reproducible plan and print its costs."""
+        plan = FaultPlan.build(Recording(args.recording), args.size, args.seed, args.test_limit)
+        plan.save(args.out)
+        print(json.dumps(plan.report(), indent=2))
+
+
+class FaultRunCommand:
+    """Execute a saved plan with explicit permission."""
+
+    name = "fault-run"
+    help = "run isolated tests against the planned faults"
+
+    def add_arguments(self, parser: argparse.ArgumentParser) -> None:
+        """Choose the saved plan, results folder and early gate."""
+        parser.add_argument("--plan", type=Path, required=True)
+        parser.add_argument("--out", type=Path, required=True)
+        parser.allow_abbrev = False
+        parser.add_argument("--live", action="store_true")
+        parser.add_argument("--gate", action="store_true", help="check the verdict mix after 20 families")
+        EnvFile.add_argument(parser)
+
+    def run(self, args: argparse.Namespace) -> None:
+        """Print the cost before connecting to the service.
+
+        Raises:
+            SystemExit: If the run lacks explicit consent or would write into the recording.
+        """
+        plan = FaultPlan.load(args.plan)
+        print(f"Recording: {plan.recording}\n{json.dumps(plan.report(), indent=2)}", flush=True)
+        if not args.live:
+            raise SystemExit("Pass --live to start this fault run")
+        folder = args.out.resolve()
+        if folder.is_relative_to(Path(plan.recording)):
+            raise SystemExit("Choose a results folder outside the recording")
+        experiment = FaultRun(plan, folder)
+        env = EnvFile.read(args.env_file)
+        experiment.run(lambda: FaultSession.open(plan, folder, env), args.gate, experiment.identity(env))
+
+
 COMMANDS: tuple[Command, ...] = (
     RecordCommand(),
     CoverageCommand(),
@@ -433,6 +488,8 @@ COMMANDS: tuple[Command, ...] = (
     PlanCommand(),
     BenchCommand(),
     FaultsCommand(),
+    FaultPlanCommand(),
+    FaultRunCommand(),
 )
 
 

@@ -165,6 +165,7 @@ public final class LesstestsJUnit {
                 System.err.println("lesstests: " + identifier.getDisplayName() + " " + status);
                 error.printStackTrace();
             });
+            FaultEvidence.finished(result.getThrowable().orElse(null), identifier.isTest());
             keep(identifier, status);
         }
 

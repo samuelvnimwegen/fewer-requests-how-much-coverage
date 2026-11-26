@@ -354,6 +354,7 @@ class FakeJUnitSuite:
 def test_record_on_fineract_uses_gradle_junit_and_a_per_class_reset_and_only_records_the_match(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Requirement: Fineract records selected JUnit methods with its compiled listeners and class reset."""
     monkeypatch.setattr(subjects, "GradleProject", FakeGradle)
     monkeypatch.setattr(subjects, "JUnitSuite", FakeJUnitSuite)
     monkeypatch.setattr(cli, "Recorder", FakeRecorder)
@@ -364,7 +365,7 @@ def test_record_on_fineract_uses_gradle_junit_and_a_per_class_reset_and_only_rec
 
     recorder = FakeRecorder.made[0]
     assert recorder.suite.project.module == ":integration-tests"
-    assert [helper.name for helper in recorder.suite.project.helpers] == ["LesstestsJUnit.java"]
+    assert [helper.name for helper in recorder.suite.project.helpers] == ["LesstestsJUnit.java", "FaultEvidence.java"]
     assert recorder.suite.settings.public_env["BACKEND_PORT"] == "8091"
 
     # The address is no secret, so the console logs keep it.

@@ -525,6 +525,7 @@ class RunResult:
 
     outcome: Outcome
     seconds: float
+    exit_code: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -769,9 +770,10 @@ class JvmRunner:
         """
         reports = self._fresh(self._output / test.id)
         started = time.monotonic()
-        if not self._java(self._launcher.one(test, reports, self._settings), reports, self._timeout):
+        code = self._java(self._launcher.one(test, reports, self._settings), reports, self._timeout)
+        if code is None:
             return RunResult(Outcome.ERROR, time.monotonic() - started)
-        return RunResult(self._launcher.outcomes(reports, [test])[test], time.monotonic() - started)
+        return RunResult(self._launcher.outcomes(reports, [test])[test], time.monotonic() - started, code)
 
     def run_suite(self, tests: list[JavaTest], name: str) -> SuiteRun:
         """Run all these tests together in one JVM.
@@ -784,7 +786,7 @@ class JvmRunner:
         started = time.monotonic()
         finished = self._java(arguments, reports, self._suite_timeout)
         seconds = time.monotonic() - started
-        if not finished:
+        if finished is None:
             return SuiteRun(dict.fromkeys(tests, Outcome.ERROR), seconds, finished=False)
         return SuiteRun(self._launcher.outcomes(reports, tests), seconds)
 
@@ -806,11 +808,11 @@ class JvmRunner:
         flags = [*project.jvm_arguments, *settings.java_arguments()]
         return [project.java, *flags, "-cp", project.classpath, *arguments]
 
-    def _java(self, arguments: list[str], reports: Path, timeout: float) -> bool:
+    def _java(self, arguments: list[str], reports: Path, timeout: float) -> int | None:
         """Run the JVM and keep its console output next to its reports.
 
         Returns:
-            False when the JVM hung and was stopped.
+            The exit status or None after a timeout.
         """
         try:
             result = subprocess.run(
@@ -823,10 +825,10 @@ class JvmRunner:
                 env=self._settings.environment(),
             )
         except subprocess.TimeoutExpired:
-            return False
+            return None
         console = self._settings.hide_secrets(result.stdout + result.stderr)
         (reports / "console.log").write_text(console, encoding="utf-8")
-        return True
+        return result.returncode
 
     @staticmethod
     def _fresh(folder: Path) -> Path:

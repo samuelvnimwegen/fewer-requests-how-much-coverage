@@ -129,7 +129,8 @@ class GradleJUnit:
         Returns:
             The project.
         """
-        return GradleProject(source, workdir, self.module, overlays, self.env, (JUnitLauncher.SOURCE,))
+        helpers = (JUnitLauncher.SOURCE, JUnitLauncher.SOURCE.with_name("FaultEvidence.java"))
+        return GradleProject(source, workdir, self.module, overlays, self.env, helpers)
 
     def suite(self, project: BuiltProject, package: str, settings: JvmSettings) -> SuiteFinder:
         """Ask JUnit for the tests.

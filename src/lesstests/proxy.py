@@ -64,7 +64,8 @@ class _LoggingServer(ThreadingHTTPServer):
         Returns:
             The response the client receives, including any requested edit.
         """
-        return self.fault.apply(exchange) if self.fault is not None else exchange.response
+        fault = self.fault
+        return fault.apply(exchange) if fault is not None else exchange.response
 
 
 class _ForwardingHandler(BaseHTTPRequestHandler):
@@ -80,10 +81,13 @@ class _ForwardingHandler(BaseHTTPRequestHandler):
         """Keep the console quiet, the recording holds every exchange."""
 
     def _forward(self) -> None:
+        fault = self._proxy.fault
+        token = self.headers.get("X-Lesstests-Execution") if fault and fault.execution else None
+        log = ExchangeLog() if token and fault and token != fault.execution else self._proxy.log
         try:
             body = self._read_body()
         except (OSError, ValueError) as error:
-            self._proxy.log.fail(f"{self._label()}: unreadable request body: {error}")
+            log.fail(f"{self._label()}: unreadable request body: {error}")
 
             # The rest of a broken body is still on the connection, so it can't carry another request.
             self.close_connection = True
@@ -94,13 +98,27 @@ class _ForwardingHandler(BaseHTTPRequestHandler):
         try:
             response = self._send_upstream(request)
         except (OSError, http.client.HTTPException) as error:
-            self._proxy.log.fail(f"{self._label()}: {error}")
+            log.fail(f"{self._label()}: {error}")
             self.send_error(502, "Upstream service unreachable")
             return
-        response = self._keep(Exchange(request, response))
+        exchange = Exchange(request, response)
+        response = self._keep(exchange)
+        matched = fault if fault and fault.execution and fault.hit and fault.hit.exchange is exchange else None
+        try:
+            self._send_response(response, matched)
+        except OSError as error:
+            log.fail(f"{self._label()}: response write failed: {error}")
+            self.close_connection = True
+            return
+        if matched:
+            matched.sent = True
+
+    def _send_response(self, response: HttpResponse, matched: ProxyFault | None) -> None:
 
         # The plain send_response adds its own Server and Date, which would double the upstream ones.
         self.send_response_only(response.status, response.reason)
+        if matched:
+            self.send_header("X-Lesstests-Execution", matched.receipt)
         if self.command == "HEAD":
             for key, value in response.headers.without(*HOP_BY_HOP).pairs:
                 self.send_header(key, value)
@@ -164,7 +182,7 @@ class _ForwardingHandler(BaseHTTPRequestHandler):
             The answer.
         """
         connection.putrequest(request.method, request.target, skip_host=True, skip_accept_encoding=True)
-        for key, value in request.headers.without(*HOP_BY_HOP, "content-length").pairs:
+        for key, value in request.headers.without(*HOP_BY_HOP, "content-length", "x-lesstests-execution").pairs:
             connection.putheader(key, value)
         if request.body.data or request.method in ("POST", "PUT", "PATCH"):
             connection.putheader("Content-Length", str(len(request.body.data)))
@@ -395,6 +413,13 @@ class Proxy:
             The server.
         """
         raise NotImplementedError
+
+    def arm(self, fault: ProxyFault | None) -> None:
+        """Select the fault for a running proxy."""
+        if self._server is not None:
+            if fault is not None:
+                self.log = self._server.log = ExchangeLog()
+            self._server.fault = fault
 
     def start(self) -> None:
         """Open the port and serve in a background thread."""
