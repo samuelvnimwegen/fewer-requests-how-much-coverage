@@ -525,7 +525,7 @@ class RunResult:
 
     outcome: Outcome
     seconds: float
-    failure_kind: str | None = None
+    exit_code: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -556,14 +556,6 @@ class Launcher(Protocol):
 
         Returns:
             The arguments after the classpath.
-        """
-        ...
-
-    def failure_kind(self, reports: Path, test: JavaTest) -> str | None:
-        """Read the throwable behind a reported failure.
-
-        Returns:
-            Its category if the test report identifies it.
         """
         ...
 
@@ -601,24 +593,6 @@ class TestNgLauncher:
         suite_file = reports / "suite.xml"
         suite_file.write_text(self.suite_xml(tests, name), encoding="utf-8")
         return [self.MAIN, "-d", str(reports), *settings.testng_arguments(), str(suite_file)]
-
-    def failure_kind(self, reports: Path, test: JavaTest) -> str | None:
-        """Read the throwable behind a reported failure.
-
-        Returns:
-            Its category if the test report identifies it.
-        """
-        classes = {
-            exception.get("class", "") if (exception := method.find("exception")) is not None else ""
-            for method in self._methods(reports / "testng-results.xml", test)
-            if method.get("status") == "FAIL"
-        }
-        if any(
-            name.endswith(("AssertionError", "AssertionFailedError", "ComparisonFailure", "MultipleFailuresError"))
-            for name in classes
-        ):
-            return "assertion failure"
-        return "client error" if classes and all(classes) else None
 
     def outcomes(self, reports: Path, tests: list[JavaTest]) -> dict[JavaTest, Outcome]:
         """Read `testng-results.xml`.
@@ -697,20 +671,6 @@ class JUnitLauncher:
         selection = reports / "selection.tsv"
         selection.write_text("".join(f"{test.class_name}\t{test.method}\n" for test in tests), encoding="utf-8")
         return [self.MAIN, "run", str(reports), str(selection)]
-
-    def failure_kind(self, reports: Path, test: JavaTest) -> str | None:
-        """Read the throwable behind a reported failure.
-
-        Returns:
-            Its category if the test report identifies it.
-        """
-        path = reports / "failures.tsv"
-        if path.exists():
-            for line in path.read_text(encoding="utf-8").splitlines():
-                cls, method, reason = line.split("\t")
-                if JavaTest(cls, method) == test:
-                    return reason
-        return None
 
     def outcomes(self, reports: Path, tests: list[JavaTest]) -> dict[JavaTest, Outcome]:
         """Read `results.tsv`. `LesstestsJUnit` writes `MISSING` for a method it never saw finish.
@@ -810,11 +770,10 @@ class JvmRunner:
         """
         reports = self._fresh(self._output / test.id)
         started = time.monotonic()
-        if not self._java(self._launcher.one(test, reports, self._settings), reports, self._timeout):
+        code = self._java(self._launcher.one(test, reports, self._settings), reports, self._timeout)
+        if code is None:
             return RunResult(Outcome.ERROR, time.monotonic() - started)
-        outcome = self._launcher.outcomes(reports, [test])[test]
-        kind = self._launcher.failure_kind(reports, test) if outcome == Outcome.FAILED else None
-        return RunResult(outcome, time.monotonic() - started, kind)
+        return RunResult(self._launcher.outcomes(reports, [test])[test], time.monotonic() - started, code)
 
     def run_suite(self, tests: list[JavaTest], name: str) -> SuiteRun:
         """Run all these tests together in one JVM.
@@ -827,7 +786,7 @@ class JvmRunner:
         started = time.monotonic()
         finished = self._java(arguments, reports, self._suite_timeout)
         seconds = time.monotonic() - started
-        if not finished:
+        if finished is None:
             return SuiteRun(dict.fromkeys(tests, Outcome.ERROR), seconds, finished=False)
         return SuiteRun(self._launcher.outcomes(reports, tests), seconds)
 
@@ -849,11 +808,11 @@ class JvmRunner:
         flags = [*project.jvm_arguments, *settings.java_arguments()]
         return [project.java, *flags, "-cp", project.classpath, *arguments]
 
-    def _java(self, arguments: list[str], reports: Path, timeout: float) -> bool:
+    def _java(self, arguments: list[str], reports: Path, timeout: float) -> int | None:
         """Run the JVM and keep its console output next to its reports.
 
         Returns:
-            False when the JVM hung and was stopped.
+            The exit status or None after a timeout.
         """
         try:
             result = subprocess.run(
@@ -866,10 +825,10 @@ class JvmRunner:
                 env=self._settings.environment(),
             )
         except subprocess.TimeoutExpired:
-            return False
+            return None
         console = self._settings.hide_secrets(result.stdout + result.stderr)
         (reports / "console.log").write_text(console, encoding="utf-8")
-        return True
+        return result.returncode
 
     @staticmethod
     def _fresh(folder: Path) -> Path:

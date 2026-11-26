@@ -399,8 +399,11 @@ class ResponseFaults:
 class ProxyFault:
     """Apply one family once across the proxy's concurrent handlers."""
 
-    def __init__(self, api: ApiDescription, family: FaultFamily) -> None:
+    def __init__(self, api: ApiDescription, family: FaultFamily, execution: str = "", observe: bool = False) -> None:
         """Arm the proxy with a family from the inventory."""
+        self.execution = execution
+        self.observe = observe
+        self.sent = False
         self._api = api
         self._family = family
         self._hit: FaultHit | None = None
@@ -432,7 +435,9 @@ class ProxyFault:
         """
         response = exchange.response
         with self._lock:
-            if self.applied:
+            if self.applied or (
+                self.execution and exchange.request.headers.get("X-Lesstests-Execution") != self.execution
+            ):
                 return response
             operation = self._api.match(exchange.request.method, exchange.request.target)
             if operation is None or operation.name != self._family.operation:
@@ -441,10 +446,10 @@ class ProxyFault:
             if faults.status == self._family:
                 status = HTTPStatus.BAD_REQUEST if 200 <= response.status < 300 else HTTPStatus.OK
                 self._hit = FaultHit(exchange, (Edit((), str(response.status), str(status.value)),))
-                return replace(response, status=status.value, reason=status.phrase)
+                return response if self.observe else replace(response, status=status.value, reason=status.phrase)
             document = JsonDocument.read(exchange)
             if document and (matches := [c for c in faults.candidates(document) if c.family == self._family]):
                 changed, edits = document.rewrite(response, matches)
                 self._hit = FaultHit(exchange, edits)
-                return changed
+                return response if self.observe else changed
         return response

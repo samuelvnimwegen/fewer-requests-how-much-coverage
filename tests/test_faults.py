@@ -127,7 +127,11 @@ def test_forwarded_bytes_and_headers() -> None:
         proxy.start()
         proxy.stop()
     handler._proxy = server
-    handler._keep.side_effect = lambda pair, active: _ForwardingHandler._keep(handler, pair, active)
+    server.response.side_effect = lambda exchange: _LoggingServer.response(server, exchange)
+    handler._keep.side_effect = lambda pair: _ForwardingHandler._keep(handler, pair)
+    handler._send_response.side_effect = lambda response, matched: _ForwardingHandler._send_response(
+        handler, response, matched
+    )
     for body in (b'{"a": 2}', data):
         handler.wfile = io.BytesIO()
         handler.send_header.reset_mock()
@@ -222,14 +226,51 @@ def test_tunnel_skips_passthrough_and_redacts_edited_response() -> None:
     handler._intercepting.passthrough = {"skip"}
     handler._intercepting.redactor = Redactor(frozenset({"secret"}))
     exchange = _exchange(b"1", headers=Headers((("secret", "private"),)))
+    handler._proxy.response.side_effect = fault.apply
     handler._host = "skip"
-    assert _TunnelHandler._keep(handler, exchange, fault) is exchange.response
+    assert _TunnelHandler._keep(handler, exchange) is exchange.response
     assert not fault.applied
     assert handler._proxy.log.take() == ([], [])
     handler._host = "included"
-    response = _TunnelHandler._keep(handler, exchange, fault)
+    response = _TunnelHandler._keep(handler, exchange)
     assert response.headers.get("secret") == "private"
     assert response.body.data == b"2"
     logged = handler._proxy.log.take()[0][0].response
     assert logged.body == response.body
     assert logged.headers.get("secret") == "<redacted>"
+
+
+def test_scoped_delivery() -> None:
+    """Requirement: A late request or a partial write cannot prove delivery to the current test."""
+    exchange = _exchange(b"1")
+    family = FaultFamily("GET /pets/{pet}", "get", 200, (), "status")
+    first = ProxyFault(API, family, "A")
+    second = ProxyFault(API, family, "B")
+    handler = Mock(spec=_ForwardingHandler)
+    handler._proxy.log = ExchangeLog()
+    handler._proxy.fault = first
+    handler.headers = {"X-Lesstests-Execution": "A"}
+    handler._request.return_value = exchange.request
+    handler._read_body.return_value = b""
+    handler._proxy.response.side_effect = lambda exchange: _LoggingServer.response(handler._proxy, exchange)
+    handler._keep.side_effect = lambda pair: _ForwardingHandler._keep(handler, pair)
+
+    handler._request.side_effect = lambda _: replace(exchange.request, headers=Headers(tuple(handler.headers.items())))
+
+    def switch(request: HttpRequest) -> HttpResponse:
+        handler._proxy.fault = second
+        return exchange.response
+
+    handler._send_upstream.side_effect = switch
+    _ForwardingHandler._forward(handler)
+    assert not first.sent and not second.hit
+    _ForwardingHandler._forward(handler)
+    assert not second.hit
+    handler.headers.clear()
+    _ForwardingHandler._forward(handler)
+    assert not second.hit
+    handler.headers["X-Lesstests-Execution"] = "B"
+    handler._send_response.side_effect = BrokenPipeError("closed")
+    _ForwardingHandler._forward(handler)
+    assert second.hit and not second.sent
+    assert "response write failed" in handler._proxy.log.take()[1][0]
